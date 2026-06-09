@@ -211,9 +211,23 @@ def get_region_and_shard():
     result = valorant_api("GET", "riotclient/region-locale")
     if result:
         log.info("Region-locale response: %s", json.dumps(result))
-        region = result.get("region", "eu")
-        shard = result.get("shard") or (region + "1")
+        region = result.get("region", "eu").lower()
+        shard = (result.get("shard") or (region + "1")).lower()
         return region, shard
+    
+    conv_result = valorant_api("GET", "chat/v6/conversations")
+    if conv_result and "conversations" in conv_result:
+        for conv in conv_result["conversations"]:
+            cid = conv.get("cid", "")
+            if "@" in cid:
+                domain = cid.split("@")[1]
+                parts = domain.split(".")
+                if len(parts) >= 2:
+                    shard = parts[0]
+                    region = shard[:2]
+                    log.info("Derived region from chat: region=%s shard=%s", region, shard)
+                    return region, shard
+    
     return "eu", "eu1"
 
 
