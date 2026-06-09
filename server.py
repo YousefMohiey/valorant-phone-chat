@@ -195,65 +195,68 @@ def valorant_api(method: str, endpoint: str, data: dict | None = None):
 
 # ── Chat helpers ───────────────────────────────────────────────────────────
 
-def get_rso_token():
+def get_rso_tokens():
     result = valorant_api("GET", "entitlements/v1/token")
     if result:
-        log.info("Entitlements response keys: %s", list(result.keys()) if isinstance(result, dict) else "not dict")
-        log.info("Entitlements response: %s", json.dumps(result, indent=2)[:2000])
-        token = result.get("token") or result.get("accessToken") or result.get("entitlements_token")
-        if token:
-            return token
-    return None
+        access_token = result.get("accessToken")
+        entitlements_token = result.get("token")
+        if access_token and entitlements_token:
+            return access_token, entitlements_token
+        log.warning("Missing tokens in entitlements response: accessToken=%s, token=%s",
+                   bool(access_token), bool(entitlements_token))
+    return None, None
 
 
 def get_region_and_shard():
-    """Get player's region and shard from local API."""
     result = valorant_api("GET", "riotclient/region-locale")
     if result:
+        log.info("Region-locale response: %s", json.dumps(result))
         region = result.get("region", "eu")
-        shard = result.get("shard", "eu1")
+        shard = result.get("shard") or (region + "1")
         return region, shard
     return "eu", "eu1"
 
 
 def get_glz_base_url():
-    """Get the GLZ base URL for remote API calls."""
     region, shard = get_region_and_shard()
-    return f"https://glz-{shard}-1.{shard}.a.pvp.net"
+    url = f"https://glz-{region}-1.{shard}.a.pvp.net"
+    log.info("GLZ URL: %s", url)
+    return url
 
 
-def get_match_id_from_glz(puuid, rso_token):
-    """Get current match ID from GLZ endpoint."""
+def get_match_id_from_glz(puuid, access_token, entitlements_token):
     glz_url = get_glz_base_url()
     
     headers = {
-        "Authorization": f"Bearer {rso_token}",
-        "X-Riot-Entitlements-JWT": rso_token,
+        "Authorization": f"Bearer {access_token}",
+        "X-Riot-Entitlements-JWT": entitlements_token,
     }
     
-    # Try core-game first (in-match)
     try:
         response = requests.get(
             f"{glz_url}/core-game/v1/players/{puuid}",
             headers=headers,
             verify=False,
-            timeout=5
+            timeout=10
         )
+        log.info("Core-game GLZ response: %d", response.status_code)
         if response.status_code == 200:
             data = response.json()
             if "MatchID" in data:
                 return data["MatchID"], "coregame"
+        elif response.status_code != 404:
+            log.warning("Core-game GLZ: %s", response.text[:200])
     except Exception as e:
         log.warning("Core-game GLZ request failed: %s", e)
     
-    # Try pregame
     try:
         response = requests.get(
             f"{glz_url}/pregame/v1/players/{puuid}",
             headers=headers,
             verify=False,
-            timeout=5
+            timeout=10
         )
+        log.info("Pregame GLZ response: %d", response.status_code)
         if response.status_code == 200:
             data = response.json()
             if "MatchID" in data:
@@ -288,28 +291,27 @@ def get_team_chat_cid(preferred_type: str = "auto"):
     log.info("Player PUUID: %s", puuid)
     
     # Get RSO token for GLZ authentication
-    rso_token = get_rso_token()
-    if not rso_token:
-        log.warning("Cannot get RSO token")
+    access_token, entitlements_token = get_rso_tokens()
+    if not access_token:
+        log.warning("Cannot get RSO tokens")
         return None
     
-    log.info("Got RSO token")
+    log.info("Got RSO tokens")
     
     # Try to get match ID from GLZ
-    match_id, game_phase = get_match_id_from_glz(puuid, rso_token)
+    match_id, game_phase = get_match_id_from_glz(puuid, access_token, entitlements_token)
     if match_id:
         log.info("Found match ID: %s (phase: %s)", match_id, game_phase)
         
-        # Get match details to find TeamMUCName
         glz_url = get_glz_base_url()
         headers = {
-            "Authorization": f"Bearer {rso_token}",
-            "X-Riot-Entitlements-JWT": rso_token,
+            "Authorization": f"Bearer {access_token}",
+            "X-Riot-Entitlements-JWT": entitlements_token,
         }
         
         try:
             endpoint = f"{glz_url}/core-game/v1/matches/{match_id}" if game_phase == "coregame" else f"{glz_url}/pregame/v1/matches/{match_id}"
-            response = requests.get(endpoint, headers=headers, verify=False, timeout=5)
+            response = requests.get(endpoint, headers=headers, verify=False, timeout=10)
             if response.status_code == 200:
                 match_details = response.json()
                 team_muc = match_details.get("TeamMUCName")
