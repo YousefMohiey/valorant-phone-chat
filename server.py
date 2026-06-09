@@ -296,6 +296,11 @@ def _extract_game_state_from_event(msg):
     uri = event.get("uri", "")
     data = event.get("data", {})
 
+    verbose = os.environ.get("BRIDGE_WS_VERBOSE", "").lower() in ("1", "true", "yes")
+
+    if verbose and "riot-messaging-service" in uri:
+        log.info("WS-EVENT: %s", uri)
+
     if "ares-pregame/pregame/v1/matches/" in uri:
         parts = uri.split("/")
         match_id = parts[-1] if parts else None
@@ -332,6 +337,8 @@ def _extract_game_state_from_event(msg):
                     with _ws_lock:
                         _game_state["session_state"] = state
                         _game_state["last_update"] = time.time()
+            if verbose and isinstance(payload, str):
+                log.debug("WS-SESSION: %s", payload[:200])
         except Exception:
             pass
 
@@ -1012,9 +1019,13 @@ if __name__ == "__main__":
 
     start_ws_listener()
 
+    verbose = os.environ.get("BRIDGE_WS_VERBOSE", "").lower() in ("1", "true", "yes")
+    if verbose:
+        log.info("WebSocket verbose logging ENABLED (BRIDGE_WS_VERBOSE=1)")
+
     print()
     print("  ========================================================")
-    print("  |        VALORANT PHONE CHAT BRIDGE v1.2              |")
+    print("  |        VALORANT PHONE CHAT BRIDGE v1.3              |")
     print("  |======================================================|")
     print("  |                                                      |")
     print("  |   On your phone, open:                               |")
@@ -1022,6 +1033,9 @@ if __name__ == "__main__":
     print("  |                                                      |")
     print("  |   Phone & PC must be on the same WiFi network.       |")
     print("  |   Valorant must be running and in a match.           |")
+    print("  |                                                      |")
+    print("  |   Logs: bridge.log (full, includes WS events)        |")
+    print("  |         bridge-run.log (startup + console)          |")
     print("  |                                                      |")
     print("  |   Press Ctrl+C to stop.                              |")
     print("  ========================================================")

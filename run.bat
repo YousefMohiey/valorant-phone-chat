@@ -112,6 +112,8 @@ echo   ^|                                                    ^|
 echo   ^|   Phone ^& PC must be on the same WiFi network.     ^|
 echo   ^|   Valorant must be running and in a match.         ^|
 echo   ^|                                                    ^|
+echo   ^|   Logs: bridge.log (everything)                    ^|
+echo   ^|         bridge-run.log (startup + console)         ^|
 echo   ^|   Close this window to stop the bridge.            ^|
 echo   ========================================================
 echo.
@@ -119,6 +121,7 @@ echo.
 echo   Server output >> "%LOGFILE%"
 echo   ============= >> "%LOGFILE%"
 cd /d "%~dp0"
+set BRIDGE_WS_VERBOSE=1
 python server.py >> "%LOGFILE%" 2>&1
 
 echo.
