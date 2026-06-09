@@ -195,6 +195,72 @@ def valorant_api(method: str, endpoint: str, data: dict | None = None):
 
 # ── Chat helpers ───────────────────────────────────────────────────────────
 
+def get_rso_token():
+    """Get RSO token from local API for GLZ authentication."""
+    result = valorant_api("GET", "entitlements/v1/token")
+    if result and "entitlements_token" in result:
+        return result["entitlements_token"]
+    return None
+
+
+def get_region_and_shard():
+    """Get player's region and shard from local API."""
+    result = valorant_api("GET", "riotclient/region-locale")
+    if result:
+        region = result.get("region", "eu")
+        shard = result.get("shard", "eu1")
+        return region, shard
+    return "eu", "eu1"
+
+
+def get_glz_base_url():
+    """Get the GLZ base URL for remote API calls."""
+    region, shard = get_region_and_shard()
+    return f"https://glz-{shard}-1.{shard}.a.pvp.net"
+
+
+def get_match_id_from_glz(puuid, rso_token):
+    """Get current match ID from GLZ endpoint."""
+    glz_url = get_glz_base_url()
+    
+    headers = {
+        "Authorization": f"Bearer {rso_token}",
+        "X-Riot-Entitlements-JWT": rso_token,
+    }
+    
+    # Try core-game first (in-match)
+    try:
+        response = requests.get(
+            f"{glz_url}/core-game/v1/players/{puuid}",
+            headers=headers,
+            verify=False,
+            timeout=5
+        )
+        if response.status_code == 200:
+            data = response.json()
+            if "MatchID" in data:
+                return data["MatchID"], "coregame"
+    except Exception as e:
+        log.warning("Core-game GLZ request failed: %s", e)
+    
+    # Try pregame
+    try:
+        response = requests.get(
+            f"{glz_url}/pregame/v1/players/{puuid}",
+            headers=headers,
+            verify=False,
+            timeout=5
+        )
+        if response.status_code == 200:
+            data = response.json()
+            if "MatchID" in data:
+                return data["MatchID"], "pregame"
+    except Exception as e:
+        log.warning("Pregame GLZ request failed: %s", e)
+    
+    return None, None
+
+
 def get_team_chat_cid(preferred_type: str = "auto"):
     now = time.time()
     if _cache["cid"] and now < _cache["expires"] and (preferred_type == "auto" or _cache["chat_type"] == preferred_type):
@@ -218,44 +284,44 @@ def get_team_chat_cid(preferred_type: str = "auto"):
     
     log.info("Player PUUID: %s", puuid)
     
-    # Try to get current game match info
-    match_info = valorant_api("GET", f"core-game/v1/players/{puuid}")
-    if match_info and "MatchID" in match_info:
-        match_id = match_info["MatchID"]
-        log.info("Current game match ID: %s", match_id)
-        
-        # Get full match details to find TeamMUCName
-        match_details = valorant_api("GET", f"core-game/v1/matches/{match_id}")
-        if match_details and "TeamMUCName" in match_details:
-            team_cid = match_details["TeamMUCName"]
-            log.info("Team chat CID: %s", team_cid)
-            _cache["cid"] = team_cid
-            _cache["chat_type"] = "team"
-            _cache["expires"] = now + CACHE_TTL
-            return {
-                "cid": team_cid,
-                "type": "groupchat",
-                "chat_type": "team",
-            }
+    # Get RSO token for GLZ authentication
+    rso_token = get_rso_token()
+    if not rso_token:
+        log.warning("Cannot get RSO token")
+        return None
     
-    # Try pregame
-    pregame_info = valorant_api("GET", f"pregame/v1/players/{puuid}")
-    if pregame_info and "MatchID" in pregame_info:
-        match_id = pregame_info["MatchID"]
-        log.info("Pregame match ID: %s", match_id)
+    log.info("Got RSO token")
+    
+    # Try to get match ID from GLZ
+    match_id, game_phase = get_match_id_from_glz(puuid, rso_token)
+    if match_id:
+        log.info("Found match ID: %s (phase: %s)", match_id, game_phase)
         
-        match_details = valorant_api("GET", f"pregame/v1/matches/{match_id}")
-        if match_details and "TeamMUCName" in match_details:
-            team_cid = match_details["TeamMUCName"]
-            log.info("Pregame team chat CID: %s", team_cid)
-            _cache["cid"] = team_cid
-            _cache["chat_type"] = "pregame"
-            _cache["expires"] = now + CACHE_TTL
-            return {
-                "cid": team_cid,
-                "type": "groupchat",
-                "chat_type": "pregame",
-            }
+        # Get match details to find TeamMUCName
+        glz_url = get_glz_base_url()
+        headers = {
+            "Authorization": f"Bearer {rso_token}",
+            "X-Riot-Entitlements-JWT": rso_token,
+        }
+        
+        try:
+            endpoint = f"{glz_url}/core-game/v1/matches/{match_id}" if game_phase == "coregame" else f"{glz_url}/pregame/v1/matches/{match_id}"
+            response = requests.get(endpoint, headers=headers, verify=False, timeout=5)
+            if response.status_code == 200:
+                match_details = response.json()
+                team_muc = match_details.get("TeamMUCName")
+                if team_muc:
+                    log.info("Team chat CID: %s", team_muc)
+                    _cache["cid"] = team_muc
+                    _cache["chat_type"] = game_phase
+                    _cache["expires"] = now + CACHE_TTL
+                    return {
+                        "cid": team_muc,
+                        "type": "groupchat",
+                        "chat_type": game_phase,
+                    }
+        except Exception as e:
+            log.warning("Failed to get match details: %s", e)
     
     # Fallback to DM conversations
     result = valorant_api("GET", "chat/v6/conversations")
