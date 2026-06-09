@@ -254,17 +254,20 @@ def get_pas_token(access_token: str) -> str | None:
             if not body:
                 log.warning("PAS returned empty body")
                 return None
-            try:
-                data = json.loads(body)
-            except json.JSONDecodeError as e:
-                log.warning("PAS JSON parse error: %s — body[:100]=%s", e, body[:100])
-                return None
-            token = data.get("token") or data.get("pas_token") or data.get("accessToken")
+            if body.startswith("eyJ"):
+                token = body
+            else:
+                try:
+                    data = json.loads(body)
+                except json.JSONDecodeError as e:
+                    log.warning("PAS JSON parse error: %s — body[:100]=%s", e, body[:100])
+                    return None
+                token = data.get("token") or data.get("pas_token") or data.get("accessToken")
             if token:
                 _xmpp_cache["pas_token"] = token
                 log.info("Got PAS token (len=%d)", len(token))
                 return token
-            log.warning("PAS response has no token field: %s", json.dumps(data)[:200])
+            log.warning("PAS response has no token field: %s", body[:200])
         else:
             log.warning("PAS returned %d: %s", resp.status_code, resp.text[:200])
     except Exception as e:
