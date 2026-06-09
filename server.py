@@ -138,9 +138,9 @@ def valorant_api(method: str, endpoint: str, data: dict | None = None):
 
 # ── Chat helpers ───────────────────────────────────────────────────────────
 
-def get_team_chat_cid():
+def get_team_chat_cid(preferred_type: str = "auto"):
     now = time.time()
-    if _cache["cid"] and now < _cache["expires"]:
+    if _cache["cid"] and now < _cache["expires"] and (preferred_type == "auto" or _cache["chat_type"] == preferred_type):
         log.debug("Using cached CID: %s (%s)", _cache["cid"], _cache["chat_type"])
         return {
             "cid": _cache["cid"],
@@ -153,44 +153,32 @@ def get_team_chat_cid():
         log.info("Full conversations response: %s", json.dumps(result, indent=2))
         
         if "conversations" in result and result["conversations"]:
-            for conv in result["conversations"]:
-                cid = conv.get("cid", conv.get("id"))
-                ctype = conv.get("type", "")
-                log.info("Conversation: cid=%s type=%s", cid, ctype)
-                if ctype == "groupchat":
-                    _cache["cid"] = cid
-                    _cache["chat_type"] = "team"
-                    _cache["expires"] = now + CACHE_TTL
-                    return {
-                        "cid": cid,
-                        "type": "groupchat",
-                        "chat_type": "team",
-                    }
-            
-            for conv in result["conversations"]:
-                cid = conv.get("cid", conv.get("id"))
-                ctype = conv.get("type", "chat")
-                log.info("Using fallback conversation: cid=%s type=%s", cid, ctype)
-                _cache["cid"] = cid
-                _cache["chat_type"] = "dm"
-                _cache["expires"] = now + CACHE_TTL
-                return {
-                    "cid": cid,
-                    "type": ctype if ctype in ("chat", "groupchat") else "chat",
-                    "chat_type": "dm",
-                }
-        else:
-            log.warning("No conversations key in response: %s", result)
-    else:
-        log.warning("Conversations endpoint returned None")
+            if preferred_type in ("auto", "dm"):
+                for conv in result["conversations"]:
+                    cid = conv.get("cid", conv.get("id"))
+                    ctype = conv.get("type", "")
+                    log.info("Conversation: cid=%s type=%s", cid, ctype)
+                    if ctype == "chat":
+                        _cache["cid"] = cid
+                        _cache["chat_type"] = "dm"
+                        _cache["expires"] = now + CACHE_TTL
+                        return {
+                            "cid": cid,
+                            "type": "chat",
+                            "chat_type": "dm",
+                        }
 
-    log.warning("Trying alternative endpoints...")
+    log.warning("Trying specific endpoints for %s chat...", preferred_type)
     
-    for endpoint, chat_type in [
-        ("chat/v6/conversations/ares-coregame", "team"),
-        ("chat/v6/conversations/ares-pregame", "pregame"),
-        ("chat/v6/conversations/ares-parties", "party"),
-    ]:
+    endpoints_to_try = []
+    if preferred_type in ("auto", "team"):
+        endpoints_to_try.append(("chat/v6/conversations/ares-coregame", "team"))
+    if preferred_type in ("auto", "pregame"):
+        endpoints_to_try.append(("chat/v6/conversations/ares-pregame", "pregame"))
+    if preferred_type in ("auto", "party"):
+        endpoints_to_try.append(("chat/v6/conversations/ares-parties", "party"))
+    
+    for endpoint, chat_type in endpoints_to_try:
         result = valorant_api("GET", endpoint)
         if result:
             log.info("%s response: %s", endpoint, json.dumps(result, indent=2))
@@ -207,13 +195,12 @@ def get_team_chat_cid():
                         "chat_type": chat_type,
                     }
 
-    log.warning("No conversations found in any endpoint")
+    log.warning("No conversations found for type=%s", preferred_type)
     return None
 
 
-def send_chat_message(message: str) -> dict:
-    """Send a chat message to the current team/match chat."""
-    chat = get_team_chat_cid()
+def send_chat_message(message: str, preferred_type: str = "auto") -> dict:
+    chat = get_team_chat_cid(preferred_type)
     if not chat:
         return {"success": False, "error": "No active chat conversation found. Are you in a game?"}
 
@@ -286,7 +273,8 @@ def api_send():
         if not data or "message" not in data:
             return jsonify({"success": False, "error": "Missing 'message' field"}), 400
 
-        result = send_chat_message(data["message"].strip())
+        chat_type = data.get("chat_type", "auto")
+        result = send_chat_message(data["message"].strip(), chat_type)
         status_code = 200 if result.get("success") else 400
         log.info("Send result: %s", result)
         return jsonify(result), status_code

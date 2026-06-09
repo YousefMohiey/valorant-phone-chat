@@ -372,6 +372,35 @@ body::after {
   position: relative;
 }
 
+.chat-type-selector {
+  display: flex;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.type-btn {
+  flex: 1;
+  padding: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.type-btn.active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+.type-btn:active {
+  transform: scale(0.96);
+}
+
 /* ── Messages ──────────────────────────────────────────────────────────────── */
 
 .messages {

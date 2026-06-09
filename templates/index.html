@@ -56,8 +56,14 @@
                 <div class="ptr-spinner"></div>
             </div>
 
-            <!-- Message history -->
-            <div id="messages" class="messages">
+        <div class="chat-type-selector">
+            <button class="type-btn active" data-type="auto">Auto</button>
+            <button class="type-btn" data-type="dm">DM</button>
+            <button class="type-btn" data-type="team">Team</button>
+            <button class="type-btn" data-type="party">Party</button>
+        </div>
+
+        <div id="messages" class="messages">
                 <div class="empty-state">
                     <div class="empty-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -126,9 +132,9 @@
         const sendBtn = document.getElementById('sendBtn');
         const charCount = document.getElementById('charCount');
         const presetsDiv = document.getElementById('presets');
-        const toastContainer = document.getElementById('toastContainer');
-        const ptrIndicator = document.getElementById('ptrIndicator');
+        const typeBtns = document.querySelectorAll('.type-btn');
 
+        let selectedChatType = 'auto';
         let isSending = false;
         let statusInterval = null;
 
@@ -146,8 +152,8 @@
 
                 if (data.chat_ready) {
                     const playerName = data.player_name || 'Player';
-                    const chatType = data.chat_type === 'dm' ? 'DM' : 'Team';
-                    statusText.textContent = `Ready — ${playerName} (${chatType})`;
+                    const chatType = data.chat_type || selectedChatType;
+                    statusText.textContent = `Ready — ${playerName} (${chatType.toUpperCase()})`;
                 } else if (data.valorant_running) {
                     statusText.textContent = 'Valorant running — join a game to chat';
                 } else {
@@ -160,6 +166,14 @@
         }
 
         // ── Send message ────────────────────────────────────────────
+
+        typeBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                typeBtns.forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                selectedChatType = btn.dataset.type;
+            });
+        });
 
         chatForm.addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -174,7 +188,7 @@
                 const res = await fetch('/api/send', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message })
+                    body: JSON.stringify({ message, chat_type: selectedChatType })
                 });
                 const data = await res.json();
 
