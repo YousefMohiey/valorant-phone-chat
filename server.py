@@ -1051,8 +1051,8 @@ def send_chat_message(message: str, preferred_type: str = "auto") -> dict:
         }
 
     is_constructed = chat["chat_type"] in ("coregame", "pregame", "party")
-    max_retries = 2
-    retry_delay = 1.5
+    max_retries = 5
+    retry_delay = 2.0
 
     for attempt in range(1, max_retries + 1):
         result = valorant_api(
@@ -1069,7 +1069,7 @@ def send_chat_message(message: str, preferred_type: str = "auto") -> dict:
             return {"success": True, "message": message, "chat_type": chat["chat_type"]}
 
         if attempt < max_retries:
-            log.info("Send attempt %d failed, retrying in %.1fs...", attempt, retry_delay)
+            log.info("Send attempt %d/%d failed, retrying in %.1fs...", attempt, max_retries, retry_delay)
             time.sleep(retry_delay)
             _cache["all_conversations"] = None
             _cache["all_conversations_expires"] = 0
