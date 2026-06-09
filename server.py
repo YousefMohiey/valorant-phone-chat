@@ -133,7 +133,10 @@ _cache = {
     "session_expires": 0,
 }
 
-CACHE_TTL = 30
+CACHE_TTL = 120
+
+_last_send_time = 0
+SEND_COOLDOWN = 30
 
 # ── Lockfile ───────────────────────────────────────────────────────────────
 
@@ -503,6 +506,13 @@ def api_debug():
 
 @app.route("/api/send", methods=["POST"])
 def api_send():
+    global _last_send_time
+    
+    now = time.time()
+    if now - _last_send_time < SEND_COOLDOWN:
+        wait = int(SEND_COOLDOWN - (now - _last_send_time))
+        return jsonify({"success": False, "error": f"Rate limited. Wait {wait}s"}), 429
+    
     try:
         data = request.get_json(silent=True)
         if not data or "message" not in data:
@@ -511,11 +521,11 @@ def api_send():
         direct_cid = data.get("cid")
         if direct_cid:
             result = send_to_cid(direct_cid, data["message"].strip())
-            status_code = 200 if result.get("success") else 400
-            return jsonify(result), status_code
-
-        chat_type = data.get("chat_type", "auto")
-        result = send_chat_message(data["message"].strip(), chat_type)
+        else:
+            chat_type = data.get("chat_type", "auto")
+            result = send_chat_message(data["message"].strip(), chat_type)
+        
+        _last_send_time = time.time()
         status_code = 200 if result.get("success") else 400
         log.info("Send result: %s", result)
         return jsonify(result), status_code

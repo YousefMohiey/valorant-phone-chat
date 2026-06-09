@@ -242,12 +242,10 @@
                     body: JSON.stringify(body)
                 });
                 const data = await res.json();
-
-                // Remove empty state if present
+                
                 const empty = messagesDiv.querySelector('.empty-state');
                 if (empty) empty.remove();
 
-                // Add sent message to history
                 const msgEl = document.createElement('div');
                 msgEl.className = 'msg ' + (data.success ? 'msg-sent' : 'msg-error');
                 msgEl.innerHTML = `
@@ -260,10 +258,6 @@
                 if (data.success) {
                     messageInput.value = '';
                     charCount.textContent = '0 / 150';
-                    charCount.classList.remove('warning', 'danger');
-                    showToast('Sent to team chat', 'success');
-                } else {
-                    showToast(data.error || 'Failed to send', 'error');
                 }
             } catch (err) {
                 const msgEl = document.createElement('div');
@@ -372,8 +366,9 @@
 
         // ── Init ────────────────────────────────────────────────────
 
+        // Poll every 60 seconds instead of 15
         checkStatus();
-        statusInterval = setInterval(checkStatus, 15000);
+        statusInterval = setInterval(checkStatus, 60000);
     </script>
 </body>
 </html>
