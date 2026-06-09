@@ -196,10 +196,13 @@ def valorant_api(method: str, endpoint: str, data: dict | None = None):
 # ── Chat helpers ───────────────────────────────────────────────────────────
 
 def get_rso_token():
-    """Get RSO token from local API for GLZ authentication."""
     result = valorant_api("GET", "entitlements/v1/token")
-    if result and "entitlements_token" in result:
-        return result["entitlements_token"]
+    if result:
+        log.info("Entitlements response keys: %s", list(result.keys()) if isinstance(result, dict) else "not dict")
+        log.info("Entitlements response: %s", json.dumps(result, indent=2)[:2000])
+        token = result.get("token") or result.get("accessToken") or result.get("entitlements_token")
+        if token:
+            return token
     return None
 
 
