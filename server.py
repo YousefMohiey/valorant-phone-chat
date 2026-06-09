@@ -487,6 +487,19 @@ def api_conversations():
     
     return jsonify({"conversations": conversations})
 
+@app.route("/api/debug")
+def api_debug():
+    endpoints_found = []
+
+    for ep in ["help", "swagger/v3/openapi.json", "chat/v5/session", "chat/v5/conversations"]:
+        result = valorant_api("GET", ep)
+        if result:
+            endpoints_found.append({"endpoint": ep, "status": "200", "keys": list(result.keys()) if isinstance(result, dict) else "list", "preview": json.dumps(result)[:500]})
+        else:
+            endpoints_found.append({"endpoint": ep, "status": "failed"})
+    
+    return jsonify({"endpoints": endpoints_found})
+
 @app.route("/api/send", methods=["POST"])
 def api_send():
     try:
@@ -552,6 +565,11 @@ def get_local_ip() -> str:
 
 if __name__ == "__main__":
     local_ip = get_local_ip()
+
+    for ep in ["help", "swagger/v3/openapi.json"]:
+        result = valorant_api("GET", ep)
+        if result:
+            log.info("Endpoint %s: %s", ep, json.dumps(result)[:1000])
 
     print()
     print("  ========================================================")
