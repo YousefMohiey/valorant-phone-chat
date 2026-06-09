@@ -53,7 +53,9 @@ log.info("Lockfile path: %s", LOCKFILE_PATH)
 def read_lockfile():
     try:
         with open(LOCKFILE_PATH, "r") as f:
-            parts = f.read().strip().split(":")
+            content = f.read().strip()
+        log.info("Lockfile content: %s", content)
+        parts = content.split(":")
         if len(parts) < 4:
             log.warning("Lockfile has unexpected format: %s", parts)
             return None
@@ -64,7 +66,7 @@ def read_lockfile():
             "password": parts[3],
             "protocol": parts[4] if len(parts) > 4 else "https",
         }
-        log.debug("Lockfile loaded: port=%s, protocol=%s", lockfile["port"], lockfile["protocol"])
+        log.info("Lockfile loaded: port=%s, protocol=%s", lockfile["port"], lockfile["protocol"])
         return lockfile
     except FileNotFoundError:
         log.warning("Lockfile not found at: %s", LOCKFILE_PATH)
@@ -105,10 +107,13 @@ def valorant_api(method: str, endpoint: str, data: dict | None = None):
             verify=False,
             timeout=5,
         )
-        log.debug("API response: %d", response.status_code)
+        log.info("API %s %s -> %d", method, endpoint, response.status_code)
         if response.status_code == 200:
             return response.json()
-        log.warning("API returned %d for %s", response.status_code, endpoint)
+        try:
+            log.warning("API %s %s returned %d: %s", method, endpoint, response.status_code, response.text[:500])
+        except Exception:
+            log.warning("API %s %s returned %d (no body)", method, endpoint, response.status_code)
         return None
     except requests.RequestException as e:
         log.error("API request failed: %s", e)
@@ -120,42 +125,53 @@ def valorant_api(method: str, endpoint: str, data: dict | None = None):
 
 # ── Chat helpers ───────────────────────────────────────────────────────────
 
-def get_team_chat_cid() -> dict | None:
-    """
-    Discover the team chat conversation ID from the current game session.
-    Returns the 'cid' for the team chat channel.
-    """
+def get_team_chat_cid():
     # Try game chat first (in-match)
     result = valorant_api("GET", "chat/v6/conversations/ares-coregame")
-    if result and "conversations" in result:
-        for conv in result["conversations"]:
-            # team chat has type "groupchat"
-            return {
-                "cid": conv.get("cid", conv.get("id")),
-                "type": "groupchat",
-                "chat_type": "team",
-            }
+    if result:
+        log.info("ares-coregame response: %s", result)
+        if "conversations" in result:
+            for conv in result["conversations"]:
+                log.info("Found coregame conversation: %s", conv)
+                return {
+                    "cid": conv.get("cid", conv.get("id")),
+                    "type": "groupchat",
+                    "chat_type": "team",
+                }
+    else:
+        log.warning("ares-coregame returned None")
 
     # Try pre-game chat (agent select)
     result = valorant_api("GET", "chat/v6/conversations/ares-pregame")
-    if result and "conversations" in result:
-        for conv in result["conversations"]:
-            return {
-                "cid": conv.get("cid", conv.get("id")),
-                "type": "groupchat",
-                "chat_type": "pregame",
-            }
+    if result:
+        log.info("ares-pregame response: %s", result)
+        if "conversations" in result:
+            for conv in result["conversations"]:
+                log.info("Found pregame conversation: %s", conv)
+                return {
+                    "cid": conv.get("cid", conv.get("id")),
+                    "type": "groupchat",
+                    "chat_type": "pregame",
+                }
+    else:
+        log.warning("ares-pregame returned None")
 
     # Try party chat
     result = valorant_api("GET", "chat/v6/conversations/ares-parties")
-    if result and "conversations" in result:
-        for conv in result["conversations"]:
-            return {
-                "cid": conv.get("cid", conv.get("id")),
-                "type": "groupchat",
-                "chat_type": "party",
-            }
+    if result:
+        log.info("ares-parties response: %s", result)
+        if "conversations" in result:
+            for conv in result["conversations"]:
+                log.info("Found party conversation: %s", conv)
+                return {
+                    "cid": conv.get("cid", conv.get("id")),
+                    "type": "groupchat",
+                    "chat_type": "party",
+                }
+    else:
+        log.warning("ares-parties returned None")
 
+    log.error("No conversations found in any endpoint")
     return None
 
 

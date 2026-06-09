@@ -118,6 +118,7 @@ echo.
 
 echo   Server output >> "%LOGFILE%"
 echo   ============= >> "%LOGFILE%"
+cd /d "%~dp0"
 python server.py >> "%LOGFILE%" 2>&1
 
 echo.
