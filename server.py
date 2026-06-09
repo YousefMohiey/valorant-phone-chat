@@ -160,7 +160,7 @@ CACHE_TTL = 60
 GAME_STATE_TTL = 300
 
 _last_send_time = 0
-SEND_COOLDOWN = 30
+SEND_COOLDOWN = 0
 
 _ws_thread_started = False
 _ws_lock = threading.Lock()
@@ -384,7 +384,9 @@ def _ws_listener_loop():
                 continue
 
             _ws_send(ssl_sock, json.dumps([5, "OnJsonApiEvent"]))
-            log.info("WebSocket listener connected and subscribed")
+            _ws_send(ssl_sock, json.dumps([5, "OnJsonApiEvent_chat_v4_presences"]))
+            _ws_send(ssl_sock, json.dumps([5, "OnJsonApiEvent_chat_v6_messages"]))
+            log.info("WebSocket listener connected and subscribed to chat events")
 
             while True:
                 data = _ws_recv(ssl_sock)
@@ -812,20 +814,33 @@ def send_chat_message(message: str, preferred_type: str = "auto") -> dict:
             "error": "No active chat conversation found. Are you in a game or party?",
         }
 
-    result = valorant_api(
-        "POST",
-        "chat/v6/messages",
-        data={
-            "cid": chat["cid"],
-            "message": message,
-            "type": chat["type"],
-        },
-    )
+    max_retries = 3
+    retry_delay = 1.0
 
-    if result:
-        return {"success": True, "message": message, "chat_type": chat["chat_type"]}
-    else:
-        return {"success": False, "error": "Failed to send message. Is Valorant running?"}
+    for attempt in range(1, max_retries + 1):
+        result = valorant_api(
+            "POST",
+            "chat/v6/messages",
+            data={
+                "cid": chat["cid"],
+                "message": message,
+                "type": chat["type"],
+            },
+        )
+
+        if result:
+            return {"success": True, "message": message, "chat_type": chat["chat_type"]}
+
+        if attempt < max_retries:
+            log.info("Send attempt %d failed, retrying in %.1fs...", attempt, retry_delay)
+            time.sleep(retry_delay)
+            _cache["all_conversations"] = None
+            _cache["all_conversations_expires"] = 0
+
+    return {
+        "success": False,
+        "error": f"Failed to send to {chat['chat_type']} chat. Conversation may not be active yet.",
+    }
 
 
 # ── Status ─────────────────────────────────────────────────────────────────
