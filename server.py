@@ -45,57 +45,82 @@ app = Flask(__name__)
 # Constants
 
 def find_valorant_lockfile():
-    import glob
     import psutil
     
-    paths_to_check = []
+    lockfile_candidates = []
     
-    # If Valorant game is running, find its lockfile
-    for proc in psutil.process_iter(['name', 'exe']):
+    for proc in psutil.process_iter(['pid', 'name', 'exe']):
         try:
-            if proc.info['name'] and 'VALORANT' in proc.info['name'].upper() and 'Shipping' in proc.info['name']:
-                # Game is running, look for its lockfile
-                game_folder = os.path.dirname(proc.info['exe']) if proc.info['exe'] else None
-                if game_folder:
-                    potential_lockfile = os.path.join(game_folder, "ShooterGame", "Saved", "Config", "lockfile")
-                    if os.path.exists(potential_lockfile):
-                        paths_to_check.insert(0, potential_lockfile)  # Prioritize game lockfile
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            name = proc.info['name'] or ''
+            if 'VALORANT' in name.upper() and 'Shipping' in name:
+                valorant_pid = proc.info['pid']
+                log.info("Found Valorant process: PID=%s, Name=%s", valorant_pid, name)
+                
+                if proc.info['exe']:
+                    game_dir = os.path.dirname(proc.info['exe'])
+                    potential_paths = [
+                        os.path.join(game_dir, "ShooterGame", "Saved", "Config", "lockfile"),
+                        os.path.join(game_dir, "lockfile"),
+                        os.path.join(os.path.dirname(game_dir), "lockfile"),
+                    ]
+                    for path in potential_paths:
+                        if os.path.exists(path):
+                            lockfile_candidates.insert(0, path)
+                            log.info("Found potential game lockfile: %s", path)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
-    
-    # Fallback to common locations
-    paths_to_check.extend([
-        os.path.expandvars(r"%LocalAppData%\Riot Games\Riot Client\Config\lockfile"),
-        os.path.expandvars(r"%LocalAppData%\VALORANT\Saved\Config\lockfile"),
-    ])
     
     riot_folder = os.path.expandvars(r"%LocalAppData%\Riot Games")
     if os.path.exists(riot_folder):
         for root, dirs, files in os.walk(riot_folder):
             if "lockfile" in files:
                 lf_path = os.path.join(root, "lockfile")
-                if lf_path not in paths_to_check:
-                    paths_to_check.append(lf_path)
+                if lf_path not in lockfile_candidates:
+                    lockfile_candidates.append(lf_path)
+                    log.info("Found lockfile in search: %s", lf_path)
     
-    for path in paths_to_check:
-        if os.path.exists(path):
-            try:
-                with open(path, "r") as f:
-                    content = f.read().strip()
-                parts = content.split(":")
-                if len(parts) >= 4:
-                    log.info("Found lockfile at: %s", path)
-                    return {
-                        "path": path,
-                        "name": parts[0],
-                        "pid": parts[1],
-                        "port": parts[2],
-                        "password": parts[3],
-                        "protocol": parts[4] if len(parts) > 4 else "https",
-                    }
-            except Exception as e:
-                log.warning("Error reading %s: %s", path, e)
+    for path in lockfile_candidates:
+        try:
+            with open(path, "r") as f:
+                content = f.read().strip()
+            parts = content.split(":")
+            if len(parts) >= 4:
+                name = parts[0]
+                if "Riot Client" in name and len(lockfile_candidates) > 1:
+                    log.info("Skipping Riot Client lockfile: %s", path)
+                    continue
+                
+                log.info("Using lockfile: %s (name=%s, port=%s)", path, name, parts[2])
+                return {
+                    "path": path,
+                    "name": name,
+                    "pid": parts[1],
+                    "port": parts[2],
+                    "password": parts[3],
+                    "protocol": parts[4] if len(parts) > 4 else "https",
+                }
+        except Exception as e:
+            log.warning("Error reading %s: %s", path, e)
     
+    for path in lockfile_candidates:
+        try:
+            with open(path, "r") as f:
+                content = f.read().strip()
+            parts = content.split(":")
+            if len(parts) >= 4:
+                log.info("Fallback to lockfile: %s", path)
+                return {
+                    "path": path,
+                    "name": parts[0],
+                    "pid": parts[1],
+                    "port": parts[2],
+                    "password": parts[3],
+                    "protocol": parts[4] if len(parts) > 4 else "https",
+                }
+        except Exception as e:
+            log.warning("Error reading %s: %s", path, e)
+    
+    log.warning("No lockfile found")
     return None
 
 # Cache for conversation CIDs (avoid spamming local API)
