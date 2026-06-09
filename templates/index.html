@@ -146,7 +146,8 @@
 
                 if (data.chat_ready) {
                     const playerName = data.player_name || 'Player';
-                    statusText.textContent = `Ready — ${playerName}`;
+                    const chatType = data.chat_type === 'dm' ? 'DM' : 'Team';
+                    statusText.textContent = `Ready — ${playerName} (${chatType})`;
                 } else if (data.valorant_running) {
                     statusText.textContent = 'Valorant running — join a game to chat';
                 } else {

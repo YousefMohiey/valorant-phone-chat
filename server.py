@@ -143,16 +143,18 @@ def get_team_chat_cid():
         log.debug("Using cached CID: %s (%s)", _cache["cid"], _cache["chat_type"])
         return {
             "cid": _cache["cid"],
-            "type": "groupchat",
+            "type": "groupchat" if _cache["chat_type"] != "dm" else "chat",
             "chat_type": _cache["chat_type"],
         }
 
     result = valorant_api("GET", "chat/v6/conversations")
     if result and "conversations" in result and result["conversations"]:
+        log.info("Full conversations response: %s", result)
+        
         for conv in result["conversations"]:
             cid = conv.get("cid", conv.get("id"))
             ctype = conv.get("type", "")
-            log.info("Found conversation: cid=%s type=%s", cid, ctype)
+            log.info("Conversation: cid=%s type=%s full=%s", cid, ctype, conv)
             if ctype == "groupchat":
                 _cache["cid"] = cid
                 _cache["chat_type"] = "team"
@@ -162,27 +164,21 @@ def get_team_chat_cid():
                     "type": "groupchat",
                     "chat_type": "team",
                 }
+        
+        for conv in result["conversations"]:
+            cid = conv.get("cid", conv.get("id"))
+            ctype = conv.get("type", "chat")
+            log.info("Using fallback conversation: cid=%s type=%s", cid, ctype)
+            _cache["cid"] = cid
+            _cache["chat_type"] = "dm"
+            _cache["expires"] = now + CACHE_TTL
+            return {
+                "cid": cid,
+                "type": ctype if ctype in ("chat", "groupchat") else "chat",
+                "chat_type": "dm",
+            }
 
-    for endpoint, chat_type in [
-        ("chat/v6/conversations/ares-coregame", "team"),
-        ("chat/v6/conversations/ares-pregame", "pregame"),
-        ("chat/v6/conversations/ares-parties", "party"),
-    ]:
-        result = valorant_api("GET", endpoint)
-        if result and "conversations" in result and result["conversations"]:
-            for conv in result["conversations"]:
-                cid = conv.get("cid", conv.get("id"))
-                log.info("Found %s conversation: %s", chat_type, cid)
-                _cache["cid"] = cid
-                _cache["chat_type"] = chat_type
-                _cache["expires"] = now + CACHE_TTL
-                return {
-                    "cid": cid,
-                    "type": "groupchat",
-                    "chat_type": chat_type,
-                }
-
-    log.warning("No conversations found")
+    log.warning("No conversations found in any endpoint")
     return None
 
 
