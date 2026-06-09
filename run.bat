@@ -27,12 +27,28 @@ if %errorlevel% neq 0 (
 for /f "tokens=2" %%V in ('python --version 2^>^&1') do set PYVER=%%V
 echo   Python %PYVER% detected.
 
-:: ── Install dependencies ──────────────────────────────────────
-echo   Checking dependencies...
-pip install -r requirements.txt --quiet 2>nul
+:: ── Check pip ────────────────────────────────────────────────
+python -m pip --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo   [WARNING] Some dependencies failed. Trying without --quiet...
-    pip install -r requirements.txt
+    echo   [ERROR] pip is not installed.
+    echo.
+    echo   Run: python -m ensurepip --upgrade
+    echo   Or reinstall Python and check "Add Python to PATH".
+    echo.
+    pause
+    exit /b 1
+)
+
+:: ── Install dependencies ────────────────────────────────────
+echo   Installing dependencies...
+python -m pip install -r requirements.txt
+if %errorlevel% neq 0 (
+    echo.
+    echo   [ERROR] Failed to install dependencies.
+    echo   Try running: python -m pip install flask requests urllib3
+    echo.
+    pause
+    exit /b 1
 )
 echo   Dependencies ready.
 echo.
