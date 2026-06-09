@@ -198,21 +198,45 @@ def api_send():
 
 # ── Main ───────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
+def get_local_ip() -> str:
+    """
+    Get the actual LAN IP address (not 127.0.0.1).
+    Connects a dummy UDP socket to a public address to
+    discover the real network interface IP.
+    """
     import socket
 
-    hostname = socket.gethostname()
-    local_ip = socket.gethostbyname(hostname)
+    try:
+        # Connect to a public DNS server to discover the local IP.
+        # No data is actually sent — UDP is connectionless.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(1)
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
+        # Fallback to hostname resolution
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except OSError:
+            return "127.0.0.1"
 
-    print("=" * 56)
-    print("  VALORANT PHONE CHAT BRIDGE")
-    print("=" * 56)
+
+if __name__ == "__main__":
+    local_ip = get_local_ip()
+
     print()
-    print(f"  On your phone, open:")
-    print(f"  http://{local_ip}:8080")
-    print()
-    print("  Make sure phone & PC are on the same WiFi.")
-    print("=" * 56)
+    print("  ╔══════════════════════════════════════════════════════╗")
+    print("  ║        VALORANT PHONE CHAT BRIDGE v1.0              ║")
+    print("  ╠══════════════════════════════════════════════════════╣")
+    print("  ║                                                      ║")
+    print(f"  ║   On your phone, open:                              ║")
+    print(f"  ║   http://{local_ip}:8080              ║")
+    print("  ║                                                      ║")
+    print("  ║   Phone & PC must be on the same WiFi network.       ║")
+    print("  ║   Valorant must be running and in a match.           ║")
+    print("  ║                                                      ║")
+    print("  ║   Press Ctrl+C to stop.                              ║")
+    print("  ╚══════════════════════════════════════════════════════╝")
     print()
 
     app.run(host="0.0.0.0", port=8080, debug=False)

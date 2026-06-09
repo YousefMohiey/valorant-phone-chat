@@ -41,7 +41,7 @@ Send Valorant chat messages from your phone. This Python/Flask bridge reads Riot
 - **Quick Preset Messages** - One-tap common callouts like "rush A", "need backup", "nice"
 - **Web-Based Interface** - Works on any phone browser, no app installation needed
 - **Real-Time Status** - Shows connection state and current chat mode
-- **Zero Configuration** - Run the server and connect from your phone
+- **One-Click Launcher** - `run.bat` auto-detects IP, installs deps, configures firewall, starts the bridge
 - **Vanguard Safe** - Uses Valorant's own internal API, no memory injection or keyboard simulation
 
 ## Screenshots
@@ -57,50 +57,28 @@ The web interface provides a mobile-optimized layout with a text input field, se
 - Valorant installed and running
 - Phone and PC on the same WiFi network
 
-### Setup Steps
+### Setup & Launch
 
-1. Clone or download this repository:
+**One-click (recommended):**
 
-   ```bash
-   git clone https://github.com/yourusername/valorant-phone-chat.git
-   cd valorant-phone-chat
-   ```
+Double-click `run.bat`. It auto-detects everything — Python version, IP address, dependencies, firewall rules — and starts the server. No terminal needed.
 
-2. Install dependencies:
+**Manual:**
 
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. Find your PC's local IP address:
-
-   ```bash
-   ipconfig
-   ```
-
-   Look for "IPv4 Address" under your WiFi or Ethernet adapter (usually something like `192.168.1.X`).
+```bash
+pip install -r requirements.txt
+python server.py
+```
 
 ## Usage
 
-1. **Start Valorant** and join a match (custom game, unrated, etc.)
+1. **Start Valorant** and join a match
 
-2. **Run the bridge server**:
+2. **Double-click `run.bat`** (or run `python server.py`)
 
-   ```bash
-   python server.py
-   ```
+3. **Open your phone browser** to the URL shown in the console (`http://192.168.x.x:8080`)
 
-   The server starts on port 8080 and prints your PC's IP address to the console.
-
-3. **Open your phone browser** and navigate to:
-
-   ```
-   http://YOUR_PC_IP:8080
-   ```
-
-   Example: `http://192.168.1.100:8080`
-
-4. **Send messages** using the text input or quick preset buttons. Messages appear in Valorant chat instantly.
+4. **Send messages** — type or tap a preset. Messages appear in Valorant team chat instantly.
 
 ### Chat Modes
 
