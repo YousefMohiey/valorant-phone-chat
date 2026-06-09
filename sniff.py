@@ -72,28 +72,49 @@ def ws_send(sock, text):
     masked = bytearray(b ^ mask[i % 4] for i, b in enumerate(data))
     frame.extend(masked)
     sock.send(bytes(frame))
+    log(f"[SENT] {text[:100]}")
 
 
 def ws_recv(sock):
     header = sock.recv(2)
     if len(header) < 2:
         return None
+    
     opcode = header[0] & 0x0F
-    if opcode == 0x8:  # close
+    if opcode == 0x8:
         return None
+    
     masked = header[1] & 0x80
     length = header[1] & 0x7F
     
     if length == 126:
-        length = int.from_bytes(sock.recv(2), "big")
+        ext = sock.recv(2)
+        if len(ext) < 2:
+            return None
+        length = int.from_bytes(ext, "big")
     elif length == 127:
-        length = int.from_bytes(sock.recv(8), "big")
+        ext = sock.recv(8)
+        if len(ext) < 8:
+            return None
+        length = int.from_bytes(ext, "big")
     
+    mask_key = None
     if masked:
-        mask = sock.recv(4)
-        data = sock.recv(length)
-        return bytes(b ^ mask[i % 4] for i, b in enumerate(data))
-    return sock.recv(length)
+        mask_key = sock.recv(4)
+        if len(mask_key) < 4:
+            return None
+    
+    payload = b""
+    while len(payload) < length:
+        chunk = sock.recv(length - len(payload))
+        if not chunk:
+            return None
+        payload += chunk
+    
+    if mask_key:
+        payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+    
+    return payload
 
 
 def main():
@@ -117,43 +138,27 @@ def main():
         log("")
         
         # Subscribe to chat events
+        log("Subscribing to events...")
         ws_send(sock, json.dumps([5, "OnJsonApiEvent"]))
         time.sleep(0.1)
         ws_send(sock, json.dumps([5, "OnJsonApiEvent_chat_v4_presences"]))
         time.sleep(0.1)
         ws_send(sock, json.dumps([5, "OnJsonApiEvent_chat_v6_messages"]))
         time.sleep(0.1)
+        log("Subscriptions sent.")
         
         log("Listening for events. Press Ctrl+C to stop.")
         
-        buffer = bytearray()
         while True:
             data = ws_recv(sock)
             if data is None:
                 break
-            buffer.extend(data)
-            
-            while len(buffer) > 2:
-                # Skip non-text frames
-                if buffer[0] != 0x81:
-                    buffer.clear()
-                    break
-                
-                # Skip masked bit
-                msg_len = buffer[1] & 0x7F
-                header_len = 2
-                
-                if msg_len == 0:
-                    buffer.clear()
-                    break
-                
-                try:
-                    text = buffer[header_len:].decode("utf-8", errors="ignore")
-                    log_json(text)
-                    buffer.clear()
-                except Exception:
-                    buffer.clear()
-                    break
+            try:
+                text = data.decode("utf-8")
+                log_json(text)
+            except (UnicodeDecodeError, Exception) as e:
+                if len(data) < 200:
+                    log(f"[RAW] {data}")
     except Exception as e:
         log(f"ERROR: {e}")
     
