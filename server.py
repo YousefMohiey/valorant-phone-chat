@@ -147,10 +147,23 @@ _cache = {
     "all_conversations_expires": 0,
 }
 
-CACHE_TTL = 60  # shorter TTL so we re-discover when user enters/leaves matches
+# Live game state, updated by the background WebSocket listener
+_game_state = {
+    "match_id": None,
+    "party_id": None,
+    "session_state": None,
+    "shard": "eu1",
+    "last_update": 0,
+}
+
+CACHE_TTL = 60
+GAME_STATE_TTL = 300
 
 _last_send_time = 0
 SEND_COOLDOWN = 30
+
+_ws_thread_started = False
+_ws_lock = threading.Lock()
 
 # ── Lockfile ───────────────────────────────────────────────────────────────
 
@@ -212,6 +225,187 @@ def valorant_api(method: str, endpoint: str, data: dict | None = None):
         return None
 
 
+# ── WebSocket listener for live game state ─────────────────────────────────
+
+
+def _ws_send(sock, text):
+    data = text.encode()
+    frame = bytearray()
+    frame.append(0x81)
+    length = len(data)
+    if length < 126:
+        frame.append(length | 0x80)
+    elif length < 65536:
+        frame.append(126 | 0x80)
+        frame.extend(length.to_bytes(2, "big"))
+    else:
+        frame.append(127 | 0x80)
+        frame.extend(length.to_bytes(8, "big"))
+    mask = os.urandom(4)
+    frame.extend(mask)
+    masked = bytearray(b ^ mask[i % 4] for i, b in enumerate(data))
+    frame.extend(masked)
+    sock.send(bytes(frame))
+
+
+def _ws_recv(sock):
+    try:
+        header = sock.recv(2)
+        if len(header) < 2:
+            return None
+        opcode = header[0] & 0x0F
+        if opcode == 0x8:
+            return None
+        length = header[1] & 0x7F
+        if length == 126:
+            ext = sock.recv(2)
+            if len(ext) < 2:
+                return None
+            length = int.from_bytes(ext, "big")
+        elif length == 127:
+            ext = sock.recv(8)
+            if len(ext) < 8:
+                return None
+            length = int.from_bytes(ext, "big")
+        payload = b""
+        while len(payload) < length:
+            chunk = sock.recv(length - len(payload))
+            if not chunk:
+                return None
+            payload += chunk
+        return payload
+    except Exception:
+        return None
+
+
+def _parse_ws_message(data):
+    try:
+        text = data.decode("utf-8")
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def _extract_game_state_from_event(msg):
+    """Extract match_id, party_id, and session_state from a WebSocket event."""
+    if not isinstance(msg, list) or len(msg) < 3:
+        return
+    event = msg[2]
+    if not isinstance(event, dict):
+        return
+    uri = event.get("uri", "")
+    data = event.get("data", {})
+
+    if "ares-pregame/pregame/v1/matches/" in uri:
+        parts = uri.split("/")
+        match_id = parts[-1] if parts else None
+        if match_id:
+            with _ws_lock:
+                _game_state["match_id"] = match_id
+                _game_state["session_state"] = "PREGAME"
+                _game_state["last_update"] = time.time()
+            log.info("WS: pregame match_id=%s", match_id)
+    elif "ares-core-game/core-game/v1/matches/" in uri:
+        parts = uri.split("/")
+        match_id = parts[-1] if parts else None
+        if match_id:
+            with _ws_lock:
+                _game_state["match_id"] = match_id
+                _game_state["session_state"] = "INGAME"
+                _game_state["last_update"] = time.time()
+            log.info("WS: ingame match_id=%s", match_id)
+    elif "ares-parties/parties/v1/parties/" in uri:
+        parts = uri.split("/")
+        party_id = parts[-1] if parts else None
+        if party_id:
+            with _ws_lock:
+                _game_state["party_id"] = party_id
+                _game_state["last_update"] = time.time()
+            log.info("WS: party_id=%s", party_id)
+    elif "ares-session/v1/sessions/" in uri:
+        try:
+            payload = data.get("payload", "{}")
+            if isinstance(payload, str):
+                session_data = json.loads(payload)
+                state = session_data.get("loopState")
+                if state:
+                    with _ws_lock:
+                        _game_state["session_state"] = state
+                        _game_state["last_update"] = time.time()
+        except Exception:
+            pass
+
+
+def _ws_listener_loop():
+    """Background thread that connects to the local WebSocket and tracks game state."""
+    import ssl
+    import socket
+    from base64 import b64encode
+
+    while True:
+        try:
+            lockfile = read_lockfile()
+            if not lockfile:
+                time.sleep(5)
+                continue
+
+            auth = b64encode(f"riot:{lockfile['password']}".encode()).decode()
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            ssl_sock = ctx.wrap_socket(sock, server_hostname="127.0.0.1")
+            ssl_sock.connect(("127.0.0.1", int(lockfile["port"])))
+
+            key = b64encode(os.urandom(16)).decode()
+            handshake = (
+                f"GET / HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{lockfile['port']}\r\n"
+                f"Upgrade: websocket\r\n"
+                f"Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\n"
+                f"Sec-WebSocket-Version: 13\r\n"
+                f"Authorization: Basic {auth}\r\n"
+                f"\r\n"
+            )
+            ssl_sock.send(handshake.encode())
+            response = ssl_sock.recv(4096)
+            if b"101" not in response:
+                ssl_sock.close()
+                time.sleep(5)
+                continue
+
+            _ws_send(ssl_sock, json.dumps([5, "OnJsonApiEvent"]))
+            log.info("WebSocket listener connected and subscribed")
+
+            while True:
+                data = _ws_recv(ssl_sock)
+                if data is None:
+                    break
+                msg = _parse_ws_message(data)
+                if msg:
+                    _extract_game_state_from_event(msg)
+
+            ssl_sock.close()
+        except Exception as e:
+            log.debug("WebSocket listener error: %s", e)
+
+        time.sleep(3)
+
+
+def start_ws_listener():
+    """Start the background WebSocket listener thread (once)."""
+    global _ws_thread_started
+    with _ws_lock:
+        if _ws_thread_started:
+            return
+        _ws_thread_started = True
+    t = threading.Thread(target=_ws_listener_loop, daemon=True, name="ws-listener")
+    t.start()
+    log.info("WebSocket listener thread started")
+
+
 # ── Chat helpers ───────────────────────────────────────────────────────────
 
 
@@ -234,6 +428,134 @@ def get_puuid() -> str | None:
     return None
 
 
+def get_user_presence() -> dict | None:
+    """
+    Get the current user's presence data from the local API.
+
+    The /chat/v4/presences endpoint returns all online friends AND the current
+    user's own presence. The `private` field is base64-encoded JSON containing
+    party ID, match ID, session state, etc.
+    """
+    puuid = get_puuid()
+    if not puuid:
+        return None
+
+    result = valorant_api("GET", "chat/v4/presences")
+    if not result or "presences" not in result:
+        return None
+
+    for presence in result["presences"]:
+        if presence.get("puuid") == puuid:
+            private_b64 = presence.get("private")
+            if private_b64:
+                try:
+                    private_json = base64.b64decode(private_b64).decode("utf-8")
+                    private_data = json.loads(private_json)
+                    presence["_private_decoded"] = private_data
+                except Exception as e:
+                    log.warning("Failed to decode private presence: %s", e)
+            return presence
+
+    return None
+
+
+def get_shard_from_pid() -> str:
+    """Determine the player's shard (e.g. 'eu1', 'eu2') from their PID."""
+    session = _cache.get("session")
+    if session:
+        pid = session.get("pid", "")
+        if "@" in pid:
+            domain = pid.split("@", 1)[1]
+            if "." in domain:
+                shard = domain.split(".")[0]
+                if shard:
+                    return shard
+    return "eu1"
+
+
+def get_match_and_party_ids() -> dict:
+    """
+    Extract match ID and party ID from live game state.
+
+    Prefers the WebSocket-tracked state (most up-to-date), falls back
+    to the presence API for the party ID if not yet seen via WS.
+
+    Returns dict with keys: match_id, party_id, session_state, shard
+    """
+    shard = get_shard_from_pid()
+    result = {
+        "match_id": None,
+        "party_id": None,
+        "session_state": None,
+        "shard": shard,
+    }
+
+    with _ws_lock:
+        ws_state_age = time.time() - _game_state["last_update"] if _game_state["last_update"] else float("inf")
+        if ws_state_age < GAME_STATE_TTL:
+            result["match_id"] = _game_state["match_id"]
+            result["party_id"] = _game_state["party_id"]
+            result["session_state"] = _game_state["session_state"]
+
+    if not result["party_id"]:
+        presence = get_user_presence()
+        if presence:
+            private = presence.get("_private_decoded", {})
+            if not result["session_state"]:
+                result["session_state"] = private.get("sessionLoopState", "MENUS")
+            party_presence = private.get("partyPresenceData", {})
+            if party_presence:
+                result["party_id"] = party_presence.get("partyId")
+
+    if not result["session_state"]:
+        result["session_state"] = "MENUS"
+
+    with _ws_lock:
+        _game_state["shard"] = shard
+
+    log.info(
+        "Game state: match_id=%s party_id=%s state=%s shard=%s",
+        result["match_id"],
+        result["party_id"],
+        result["session_state"],
+        result["shard"],
+    )
+
+    return result
+
+
+def construct_team_chat_cid(match_id: str, shard: str = "eu1") -> str:
+    """Construct a team chat CID from a match ID.
+
+    Format: {match-id}-blue@ares-coregame.{shard}.pvp.net
+    """
+    return f"{match_id}-blue@ares-coregame.{shard}.pvp.net"
+
+
+def construct_all_chat_cid(match_id: str, shard: str = "eu1") -> str:
+    """Construct an all-chat CID from a match ID.
+
+    Format: {match-id}-all@ares-coregame.{shard}.pvp.net
+    """
+    return f"{match_id}-all@ares-coregame.{shard}.pvp.net"
+
+
+def construct_pregame_chat_cid(match_id: str, shard: str = "eu1") -> str:
+    """Construct a pregame (agent select) chat CID from a match ID.
+
+    Format: {match-id}@ares-pregame.{shard}.pvp.net
+    """
+    return f"{match_id}@ares-pregame.{shard}.pvp.net"
+
+
+def construct_party_chat_cid(party_id: str, shard: str = "eu1") -> str:
+    """Construct a party chat CID from a party ID.
+
+    Format: {party-id}@ares-parties.{shard}.pvp.net
+    """
+    return f"{party_id}@ares-parties.{shard}.pvp.net"
+
+
 def classify_conversation(cid: str) -> str:
     """Classify a conversation CID into a chat type label."""
     if not cid or "@" not in cid:
@@ -253,7 +575,6 @@ def classify_conversation(cid: str) -> str:
 def conversation_label(cid: str, ctype: str) -> str:
     """Generate a human-readable label for a conversation."""
     if ctype == "coregame":
-        # Team chat format: {match-id}-{team}@ares-coregame.{shard}.pvp.net
         team = cid.split("@")[0].rsplit("-", 1)[-1]
         if team == "blue":
             return "Team (Blue)"
@@ -277,7 +598,6 @@ def get_all_conversations() -> list[dict]:
     if _cache["all_conversations"] and now < _cache["all_conversations_expires"]:
         return _cache["all_conversations"]
 
-    # Query all three ares-* endpoints in one go for efficiency
     all_convs = []
 
     for endpoint, label in [
@@ -291,8 +611,6 @@ def get_all_conversations() -> list[dict]:
             for conv in result["conversations"]:
                 cid = conv.get("cid", "")
                 ctype = classify_conversation(cid)
-                # If classify_conversation couldn't determine type from domain,
-                # use the endpoint label
                 if ctype == "unknown":
                     ctype = label
                 all_convs.append({
@@ -304,7 +622,6 @@ def get_all_conversations() -> list[dict]:
                 })
                 log.info("Found conversation: cid=%s type=%s", cid, ctype)
 
-    # Deduplicate by CID (some endpoints may overlap)
     seen = set()
     unique = []
     for conv in all_convs:
@@ -320,11 +637,10 @@ def get_all_conversations() -> list[dict]:
 def get_team_chat_cid(preferred_type: str = "auto") -> dict | None:
     """Discover the best chat CID for the current game state.
 
-    Priority:
-        1. Team chat (ares-coregame) - in a match
-        2. Pregame chat (ares-pregame) - in agent select
-        3. Party chat (ares-parties) - in a party
-        4. DM - last resort fallback
+    Strategy:
+        1. Get match ID and party ID from the user's presence data
+        2. Construct CIDs directly (bypasses lazy-creation issue)
+        3. Fall back to local API conversation list for DMs
 
     Returns dict with {cid, type, chat_type} or None.
     """
@@ -341,62 +657,143 @@ def get_team_chat_cid(preferred_type: str = "auto") -> dict | None:
             "chat_type": _cache["chat_type"],
         }
 
-    # Ensure PUUID is available (needed for the /chat/v6/session call)
     puuid = get_puuid()
     if not puuid:
         log.warning("Cannot get PUUID")
         return None
 
+    ids = get_match_and_party_ids()
+    session_state = ids["session_state"]
+    party_id = ids["party_id"]
+    match_id = ids["match_id"]
+    shard = ids["shard"]
+
     conversations = get_all_conversations()
-    if not conversations:
-        log.warning("No conversations found")
-        return None
+    ares_cids = {}
+    for conv in conversations:
+        ctype = conv["type"]
+        if ctype in ("coregame", "pregame", "party"):
+            ares_cids[ctype] = conv
 
-    # Build priority list based on preference
     if preferred_type == "team":
-        priority = ["coregame", "pregame", "party", "dm"]
-    elif preferred_type == "party":
-        priority = ["party", "coregame", "pregame", "dm"]
-    elif preferred_type == "dm":
-        priority = ["dm", "coregame", "pregame", "party"]
-    else:  # auto
-        priority = ["coregame", "pregame", "party", "dm"]
+        if "coregame" in ares_cids:
+            conv = ares_cids["coregame"]
+            cid = conv["cid"]
+            team = cid.split("@")[0].rsplit("-", 1)[-1]
+            if team in ("blue", "all"):
+                log.info("Selected team chat: cid=%s", cid)
+                _cache["cid"] = cid
+                _cache["chat_type"] = "coregame"
+                _cache["expires"] = now + CACHE_TTL
+                return {"cid": cid, "type": conv["chat_type"], "chat_type": "coregame"}
+        if match_id and session_state in ("INGAME", "PREGAME"):
+            cid = construct_team_chat_cid(match_id, shard)
+            log.info("Constructed team chat CID: %s", cid)
+            _cache["cid"] = cid
+            _cache["chat_type"] = "coregame"
+            _cache["expires"] = now + CACHE_TTL
+            return {"cid": cid, "type": "groupchat", "chat_type": "coregame"}
+        if "pregame" in ares_cids:
+            conv = ares_cids["pregame"]
+            log.info("Selected pregame chat: cid=%s", conv["cid"])
+            _cache["cid"] = conv["cid"]
+            _cache["chat_type"] = "pregame"
+            _cache["expires"] = now + CACHE_TTL
+            return {"cid": conv["cid"], "type": conv["chat_type"], "chat_type": "pregame"}
 
-    for ctype in priority:
-        for conv in conversations:
-            if conv["type"] == ctype:
+    conversations = get_all_conversations()
+    ares_cids = {}
+    for conv in conversations:
+        ctype = conv["type"]
+        if ctype in ("coregame", "pregame", "party"):
+            ares_cids[ctype] = conv
+
+    if preferred_type == "team":
+        for ctype in ["coregame", "pregame"]:
+            if ctype in ares_cids:
+                conv = ares_cids[ctype]
                 cid = conv["cid"]
-                msg_type = conv["chat_type"]  # "groupchat" or "chat"
-                # For coregame: prefer the "blue" team conversation (your team)
-                # Skip "red" (enemy) and "all" unless explicitly asked
-                if ctype == "coregame" and preferred_type == "auto":
+                if ctype == "coregame":
                     team = cid.split("@")[0].rsplit("-", 1)[-1]
                     if team not in ("blue", "all"):
-                        # Skip red (enemy team) in auto mode
                         continue
                 log.info("Selected chat: cid=%s type=%s (preferred=%s)", cid, ctype, preferred_type)
                 _cache["cid"] = cid
                 _cache["chat_type"] = ctype
                 _cache["expires"] = now + CACHE_TTL
-                return {
-                    "cid": cid,
-                    "type": msg_type,
-                    "chat_type": ctype,
-                }
+                return {"cid": cid, "type": conv["chat_type"], "chat_type": ctype}
+        if match_id and session_state in ("INGAME", "PREGAME"):
+            if session_state == "INGAME":
+                cid = construct_team_chat_cid(match_id, shard)
+                log.info("Constructed team chat CID from match_id: %s", cid)
+            else:
+                cid = construct_pregame_chat_cid(match_id, shard)
+                log.info("Constructed pregame chat CID from match_id: %s", cid)
+            _cache["cid"] = cid
+            _cache["chat_type"] = "coregame" if session_state == "INGAME" else "pregame"
+            _cache["expires"] = now + CACHE_TTL
+            return {"cid": cid, "type": "groupchat", "chat_type": _cache["chat_type"]}
+    elif preferred_type == "party":
+        if "party" in ares_cids:
+            conv = ares_cids["party"]
+            cid = conv["cid"]
+            log.info("Selected party chat: cid=%s", cid)
+            _cache["cid"] = cid
+            _cache["chat_type"] = "party"
+            _cache["expires"] = now + CACHE_TTL
+            return {"cid": cid, "type": conv["chat_type"], "chat_type": "party"}
+        if party_id:
+            cid = construct_party_chat_cid(party_id, shard)
+            log.info("Constructed party chat CID: %s", cid)
+            _cache["cid"] = cid
+            _cache["chat_type"] = "party"
+            _cache["expires"] = now + CACHE_TTL
+            return {"cid": cid, "type": "groupchat", "chat_type": "party"}
 
-    # Final fallback: return first available
-    if conversations:
-        conv = conversations[0]
-        log.info("Fallback to first conversation: cid=%s type=%s", conv["cid"], conv["type"])
-        _cache["cid"] = conv["cid"]
-        _cache["chat_type"] = conv["type"]
-        _cache["expires"] = now + CACHE_TTL
-        return {
-            "cid": conv["cid"],
-            "type": conv["chat_type"],
-            "chat_type": conv["type"],
-        }
+    if preferred_type == "auto":
+        for ctype in ["coregame", "pregame", "party"]:
+            if ctype in ares_cids:
+                conv = ares_cids[ctype]
+                cid = conv["cid"]
+                if ctype == "coregame":
+                    team = cid.split("@")[0].rsplit("-", 1)[-1]
+                    if team not in ("blue", "all"):
+                        continue
+                log.info("Auto-selected chat: cid=%s type=%s", cid, ctype)
+                _cache["cid"] = cid
+                _cache["chat_type"] = ctype
+                _cache["expires"] = now + CACHE_TTL
+                return {"cid": cid, "type": conv["chat_type"], "chat_type": ctype}
 
+        if match_id and session_state in ("INGAME", "PREGAME"):
+            if session_state == "INGAME":
+                cid = construct_team_chat_cid(match_id, shard)
+            else:
+                cid = construct_pregame_chat_cid(match_id, shard)
+            log.info("Auto: using constructed match CID: %s", cid)
+            _cache["cid"] = cid
+            _cache["chat_type"] = "coregame" if session_state == "INGAME" else "pregame"
+            _cache["expires"] = now + CACHE_TTL
+            return {"cid": cid, "type": "groupchat", "chat_type": _cache["chat_type"]}
+
+        if party_id:
+            cid = construct_party_chat_cid(party_id, shard)
+            log.info("Auto: using constructed party CID: %s", cid)
+            _cache["cid"] = cid
+            _cache["chat_type"] = "party"
+            _cache["expires"] = now + CACHE_TTL
+            return {"cid": cid, "type": "groupchat", "chat_type": "party"}
+
+    for conv in conversations:
+        if conv["type"] == "dm":
+            cid = conv["cid"]
+            log.info("Fallback to DM: cid=%s", cid)
+            _cache["cid"] = cid
+            _cache["chat_type"] = "dm"
+            _cache["expires"] = now + CACHE_TTL
+            return {"cid": cid, "type": conv["chat_type"], "chat_type": "dm"}
+
+    log.warning("No conversations found")
     return None
 
 
@@ -613,9 +1010,11 @@ if __name__ == "__main__":
         if result:
             log.info("Endpoint %s: %s", ep, json.dumps(result)[:1000])
 
+    start_ws_listener()
+
     print()
     print("  ========================================================")
-    print("  |        VALORANT PHONE CHAT BRIDGE v1.1              |")
+    print("  |        VALORANT PHONE CHAT BRIDGE v1.2              |")
     print("  |======================================================|")
     print("  |                                                      |")
     print("  |   On your phone, open:                               |")
