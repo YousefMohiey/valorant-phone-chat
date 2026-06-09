@@ -2,9 +2,6 @@
 title Valorant Phone Chat Bridge
 setlocal enabledelayedexpansion
 
-:: Set UTF-8 encoding to avoid Unicode issues
-chcp 65001 >nul
-
 :: Log file — captures everything for debugging
 set LOGFILE=%~dp0bridge-run.log
 echo VALORANT PHONE CHAT BRIDGE — Run Log > "%LOGFILE%"
