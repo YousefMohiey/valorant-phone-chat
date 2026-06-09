@@ -23,7 +23,7 @@ def read_lockfile():
     return {"port": parts[2], "password": parts[3]}
 
 
-def ws_connect(host, port, path="/"):
+def ws_connect(host, port, path="/", auth_header=None):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -32,15 +32,20 @@ def ws_connect(host, port, path="/"):
     ssl_sock.connect((host, int(port)))
     
     key = b64encode(os.urandom(16)).decode()
-    request = (
-        f"GET {path} HTTP/1.1\r\n"
-        f"Host: {host}:{port}\r\n"
-        f"Upgrade: websocket\r\n"
-        f"Connection: Upgrade\r\n"
-        f"Sec-WebSocket-Key: {key}\r\n"
-        f"Sec-WebSocket-Version: 13\r\n"
-        f"\r\n"
-    )
+    headers = [
+        f"GET {path} HTTP/1.1",
+        f"Host: {host}:{port}",
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        f"Sec-WebSocket-Key: {key}",
+        "Sec-WebSocket-Version: 13",
+    ]
+    if auth_header:
+        headers.append(f"Authorization: Basic {auth_header}")
+    headers.append("")
+    headers.append("")
+    
+    request = "\r\n".join(headers)
     ssl_sock.send(request.encode())
     response = ssl_sock.recv(4096)
     if b"101" not in response:
@@ -103,7 +108,7 @@ def main():
     auth = base64.b64encode(f"riot:{lockfile['password']}".encode()).decode()
     
     try:
-        sock = ws_connect("127.0.0.1", lockfile["port"])
+        sock = ws_connect("127.0.0.1", lockfile["port"], auth_header=auth)
         log("Connected!")
         log("")
         log("SUBSCRIBE to all events. Now send a chat message in-game...")
