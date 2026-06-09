@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>VALORANT — Chat Bridge</title>
+    <link rel="stylesheet" href="/static/style.css">
+
+    <!-- Favicon — Valorant angular red mark -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='18' fill='%23ff4655'/><text x='50' y='68' font-size='52' font-weight='900' text-anchor='middle' fill='white' font-family='Arial'>V</text></svg>">
+    <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='18' fill='%23ff4655'/><text x='50' y='68' font-size='52' font-weight='900' text-anchor='middle' fill='white' font-family='Arial'>V</text></svg>">
+
+    <!-- PWA / Mobile web app -->
+    <meta name="theme-color" content="#0f1923">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="VCT Chat">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="format-detection" content="telephone=no">
+
+    <!-- SEO / Social -->
+    <meta name="description" content="Send Valorant team chat messages from your phone via local bridge">
+    <meta name="application-name" content="Valorant Chat Bridge">
+</head>
+<body>
+    <!-- Toast notification container -->
+    <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
+
+    <div class="app">
+        <!-- ═══ Header ═══ -->
+        <header class="header">
+            <div class="header-top">
+                <div class="logo-group">
+                    <div class="logo">VALORANT</div>
+                    <div class="subtitle">Phone Chat Bridge</div>
+                </div>
+                <div class="header-badge">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                        <path d="M2 17l10 5 10-5"/>
+                        <path d="M2 12l10 5 10-5"/>
+                    </svg>
+                    <span>BRIDGE</span>
+                </div>
+            </div>
+            <div id="statusBar" class="status-bar status-offline">
+                <span class="status-dot"></span>
+                <span id="statusText">Checking...</span>
+            </div>
+        </header>
+
+        <!-- ═══ Main Content ═══ -->
+        <main class="main">
+            <!-- Pull to refresh indicator -->
+            <div id="ptrIndicator" class="ptr-indicator">
+                <div class="ptr-spinner"></div>
+            </div>
+
+            <!-- Message history -->
+            <div id="messages" class="messages">
+                <div class="empty-state">
+                    <div class="empty-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                            <line x1="9" y1="10" x2="15" y2="10" opacity="0.5"/>
+                            <line x1="12" y1="7" x2="12" y2="13" opacity="0.5"/>
+                        </svg>
+                    </div>
+                    <div class="empty-title">NO MESSAGES YET</div>
+                    <p class="empty-desc">Send a message — it'll appear in your Valorant team chat</p>
+                </div>
+            </div>
+
+            <!-- Quick presets -->
+            <div class="presets-section">
+                <div class="presets-label">QUICK CALLS</div>
+                <div id="presets" class="presets">
+                    <button class="preset-btn" data-msg="brb">brb</button>
+                    <button class="preset-btn" data-msg="brb bathroom 1 min">🚽 1 min</button>
+                    <button class="preset-btn" data-msg="sorry afk sec">afk sec</button>
+                    <button class="preset-btn" data-msg="mb">mb</button>
+                    <button class="preset-btn" data-msg="nt">nt</button>
+                    <button class="preset-btn" data-msg="let's push together">push tgt</button>
+                    <button class="preset-btn" data-msg="eco next">eco next</button>
+                    <button class="preset-btn" data-msg="save">save</button>
+                </div>
+            </div>
+        </main>
+
+        <!-- ═══ Input Area ═══ -->
+        <footer class="footer">
+            <form id="chatForm" autocomplete="off">
+                <div class="input-row">
+                    <div class="input-wrapper">
+                        <input
+                            type="text"
+                            id="messageInput"
+                            placeholder="Type a message..."
+                            autofocus
+                            autocomplete="off"
+                            autocapitalize="sentences"
+                            autocorrect="off"
+                            spellcheck="false"
+                            maxlength="150"
+                        >
+                        <div class="char-count" id="charCount">0 / 150</div>
+                    </div>
+                    <button type="submit" id="sendBtn" class="send-btn" aria-label="Send message">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="22" y1="2" x2="11" y2="13"></line>
+                            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                        </svg>
+                    </button>
+                </div>
+            </form>
+        </footer>
+    </div>
+
+    <script>
+        // ── DOM References ─────────────────────────────────────────
+        const statusBar = document.getElementById('statusBar');
+        const statusText = document.getElementById('statusText');
+        const messagesDiv = document.getElementById('messages');
+        const chatForm = document.getElementById('chatForm');
+        const messageInput = document.getElementById('messageInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const charCount = document.getElementById('charCount');
+        const presetsDiv = document.getElementById('presets');
+        const toastContainer = document.getElementById('toastContainer');
+        const ptrIndicator = document.getElementById('ptrIndicator');
+
+        let isSending = false;
+        let statusInterval = null;
+
+        // ── Status polling ──────────────────────────────────────────
+
+        async function checkStatus() {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+
+                statusBar.className = 'status-bar ' + (
+                    data.chat_ready ? 'status-online' :
+                    data.valorant_running ? 'status-waiting' : 'status-offline'
+                );
+
+                if (data.chat_ready) {
+                    const playerName = data.player_name || 'Player';
+                    statusText.textContent = `Ready — ${playerName}`;
+                } else if (data.valorant_running) {
+                    statusText.textContent = 'Valorant running — join a game to chat';
+                } else {
+                    statusText.textContent = 'Valorant not running';
+                }
+            } catch (err) {
+                statusBar.className = 'status-bar status-offline';
+                statusText.textContent = 'Bridge offline';
+            }
+        }
+
+        // ── Send message ────────────────────────────────────────────
+
+        chatForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const message = messageInput.value.trim();
+            if (!message || isSending) return;
+
+            isSending = true;
+            sendBtn.disabled = true;
+            sendBtn.classList.add('sending');
+
+            try {
+                const res = await fetch('/api/send', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message })
+                });
+                const data = await res.json();
+
+                // Remove empty state if present
+                const empty = messagesDiv.querySelector('.empty-state');
+                if (empty) empty.remove();
+
+                // Add sent message to history
+                const msgEl = document.createElement('div');
+                msgEl.className = 'msg ' + (data.success ? 'msg-sent' : 'msg-error');
+                msgEl.innerHTML = `
+                    <span class="msg-text">${escapeHtml(message)}</span>
+                    <span class="msg-status">${data.success ? '✓ sent' : '✗ ' + escapeHtml(data.error || 'Failed')}</span>
+                `;
+                messagesDiv.appendChild(msgEl);
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+
+                if (data.success) {
+                    messageInput.value = '';
+                    charCount.textContent = '0 / 150';
+                    charCount.classList.remove('warning', 'danger');
+                    showToast('Sent to team chat', 'success');
+                } else {
+                    showToast(data.error || 'Failed to send', 'error');
+                }
+            } catch (err) {
+                const msgEl = document.createElement('div');
+                msgEl.className = 'msg msg-error';
+                msgEl.innerHTML = `<span class="msg-text">${escapeHtml(message)}</span><span class="msg-status">✗ Connection error</span>`;
+                messagesDiv.appendChild(msgEl);
+                showToast('Connection error', 'error');
+            }
+
+            isSending = false;
+            sendBtn.disabled = false;
+            sendBtn.classList.remove('sending');
+            messageInput.focus();
+        });
+
+        // ── Quick presets ───────────────────────────────────────────
+
+        presetsDiv.addEventListener('click', (e) => {
+            const btn = e.target.closest('.preset-btn');
+            if (!btn) return;
+            messageInput.value = btn.dataset.msg;
+            messageInput.focus();
+            charCount.textContent = `${btn.dataset.msg.length} / 150`;
+            updateCharCountStyle(btn.dataset.msg.length);
+
+            // Auto-submit on double-tap
+            if (btn.dataset.doubletap) {
+                chatForm.dispatchEvent(new Event('submit'));
+                btn.dataset.doubletap = '';
+            } else {
+                btn.dataset.doubletap = '1';
+                setTimeout(() => { btn.dataset.doubletap = ''; }, 400);
+            }
+        });
+
+        // ── Character counter ───────────────────────────────────────
+
+        messageInput.addEventListener('input', () => {
+            charCount.textContent = `${messageInput.value.length} / 150`;
+            updateCharCountStyle(messageInput.value.length);
+        });
+
+        function updateCharCountStyle(len) {
+            charCount.classList.toggle('warning', len >= 120 && len < 140);
+            charCount.classList.toggle('danger', len >= 140);
+        }
+
+        // ── Toast notification system ───────────────────────────────
+
+        function showToast(text, type = 'success') {
+            const toast = document.createElement('div');
+            toast.className = `toast ${type === 'error' ? 'toast-error' : ''}`;
+
+            const iconSvg = type === 'error'
+                ? '<svg class="toast-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>'
+                : '<svg class="toast-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>';
+
+            toast.innerHTML = `${iconSvg}<span class="toast-text">${escapeHtml(text)}</span>`;
+            toastContainer.appendChild(toast);
+
+            // Auto-dismiss
+            setTimeout(() => {
+                toast.classList.add('toast-out');
+                toast.addEventListener('animationend', () => toast.remove());
+            }, 2500);
+        }
+
+        // ── Pull to refresh ─────────────────────────────────────────
+
+        let ptrStartY = 0;
+        let ptrPulling = false;
+
+        messagesDiv.addEventListener('touchstart', (e) => {
+            if (messagesDiv.scrollTop === 0) {
+                ptrStartY = e.touches[0].clientY;
+            }
+        }, { passive: true });
+
+        messagesDiv.addEventListener('touchmove', (e) => {
+            if (messagesDiv.scrollTop === 0 && !ptrPulling) {
+                const diff = e.touches[0].clientY - ptrStartY;
+                if (diff > 60) {
+                    ptrPulling = true;
+                    ptrIndicator.classList.add('active');
+                }
+            }
+        }, { passive: true });
+
+        messagesDiv.addEventListener('touchend', async () => {
+            if (ptrPulling) {
+                await checkStatus();
+                setTimeout(() => {
+                    ptrIndicator.classList.remove('active');
+                    ptrPulling = false;
+                }, 600);
+            }
+        }, { passive: true });
+
+        // ── Helpers ─────────────────────────────────────────────────
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // ── Init ────────────────────────────────────────────────────
+
+        checkStatus();
+        statusInterval = setInterval(checkStatus, 5000);
+    </script>
+</body>
+</html>
