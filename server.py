@@ -9,41 +9,68 @@ Vanguard-safe: uses Valorant's own internal API, not keyboard injection.
 """
 
 import base64
+import logging
 import os
+import sys
+import traceback
+from datetime import datetime
 
 import requests
 import urllib3
 from flask import Flask, jsonify, request, render_template
 
+# Logging
+
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge.log")
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),
+    ],
+)
+log = logging.getLogger("bridge")
+
+log.info("Logger initialized. Log file: %s", LOG_FILE)
+
 # ── Flask setup ────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
 
-# ── Constants ──────────────────────────────────────────────────────────────
+# Constants
 
 LOCKFILE_PATH = os.path.expandvars(
     r"%LocalAppData%\Riot Games\Riot Client\Config\lockfile"
 )
 
+log.info("Lockfile path: %s", LOCKFILE_PATH)
+
 # ── Lockfile ───────────────────────────────────────────────────────────────
 
-def read_lockfile() -> dict | None:
-    """Parse the Riot lockfile to extract port and password."""
+def read_lockfile():
     try:
         with open(LOCKFILE_PATH, "r") as f:
             parts = f.read().strip().split(":")
         if len(parts) < 4:
+            log.warning("Lockfile has unexpected format: %s", parts)
             return None
-        return {
+        lockfile = {
             "name": parts[0],
             "pid": parts[1],
             "port": parts[2],
             "password": parts[3],
             "protocol": parts[4] if len(parts) > 4 else "https",
         }
+        log.debug("Lockfile loaded: port=%s, protocol=%s", lockfile["port"], lockfile["protocol"])
+        return lockfile
     except FileNotFoundError:
+        log.warning("Lockfile not found at: %s", LOCKFILE_PATH)
         return None
-    except Exception:
+    except Exception as e:
+        log.error("Error reading lockfile: %s", e)
         return None
 
 
@@ -53,10 +80,10 @@ def read_lockfile() -> dict | None:
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
-def valorant_api(method: str, endpoint: str, data: dict | None = None) -> dict | None:
-    """Make an authenticated request to Valorant's local HTTP API."""
+def valorant_api(method: str, endpoint: str, data: dict | None = None):
     lockfile = read_lockfile()
     if not lockfile:
+        log.warning("Cannot call API: no lockfile")
         return None
 
     base_url = f"https://127.0.0.1:{lockfile['port']}"
@@ -69,6 +96,7 @@ def valorant_api(method: str, endpoint: str, data: dict | None = None) -> dict |
     }
 
     try:
+        log.debug("API %s %s", method, endpoint)
         response = requests.request(
             method=method,
             url=f"{base_url}/{endpoint}",
@@ -77,10 +105,16 @@ def valorant_api(method: str, endpoint: str, data: dict | None = None) -> dict |
             verify=False,
             timeout=5,
         )
+        log.debug("API response: %d", response.status_code)
         if response.status_code == 200:
             return response.json()
+        log.warning("API returned %d for %s", response.status_code, endpoint)
         return None
-    except requests.RequestException:
+    except requests.RequestException as e:
+        log.error("API request failed: %s", e)
+        return None
+    except Exception as e:
+        log.error("Unexpected API error: %s", e)
         return None
 
 
@@ -180,20 +214,27 @@ def index():
 
 @app.route("/api/status")
 def api_status():
-    """Get current Valorant/chat status."""
-    return jsonify(get_status())
+    try:
+        return jsonify(get_status())
+    except Exception as e:
+        log.error("Status endpoint crashed: %s\n%s", e, traceback.format_exc())
+        return jsonify({"valorant_running": False, "chat_ready": False, "error": str(e)}), 500
 
 
 @app.route("/api/send", methods=["POST"])
 def api_send():
-    """Send a chat message to Valorant."""
-    data = request.get_json(silent=True)
-    if not data or "message" not in data:
-        return jsonify({"success": False, "error": "Missing 'message' field"}), 400
+    try:
+        data = request.get_json(silent=True)
+        if not data or "message" not in data:
+            return jsonify({"success": False, "error": "Missing 'message' field"}), 400
 
-    result = send_chat_message(data["message"].strip())
-    status_code = 200 if result.get("success") else 400
-    return jsonify(result), status_code
+        result = send_chat_message(data["message"].strip())
+        status_code = 200 if result.get("success") else 400
+        log.info("Send result: %s", result)
+        return jsonify(result), status_code
+    except Exception as e:
+        log.error("Send endpoint crashed: %s\n%s", e, traceback.format_exc())
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # ── Main ───────────────────────────────────────────────────────────────────

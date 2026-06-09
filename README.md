@@ -70,6 +70,10 @@ pip install -r requirements.txt
 python server.py
 ```
 
+**Logs:**
+
+Both `run.bat` and `server.py` write logs to `bridge-run.log` and `bridge.log` respectively in the project folder. If something crashes, check these files for the full error output.
+
 ## Usage
 
 1. **Start Valorant** and join a match
