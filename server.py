@@ -205,54 +205,77 @@ def get_team_chat_cid(preferred_type: str = "auto"):
             "chat_type": _cache["chat_type"],
         }
 
-    result = valorant_api("GET", "chat/v6/conversations")
-    if result:
-        log.info("Full conversations response: %s", json.dumps(result, indent=2))
+    # Get PUUID first
+    session = valorant_api("GET", "chat/v1/session")
+    if not session:
+        log.warning("Cannot get session info")
+        return None
+    
+    puuid = session.get("puuid")
+    if not puuid:
+        log.warning("No PUUID in session")
+        return None
+    
+    log.info("Player PUUID: %s", puuid)
+    
+    # Try to get current game match info
+    match_info = valorant_api("GET", f"core-game/v1/players/{puuid}")
+    if match_info and "MatchID" in match_info:
+        match_id = match_info["MatchID"]
+        log.info("Current game match ID: %s", match_id)
         
-        if "conversations" in result and result["conversations"]:
-            if preferred_type in ("auto", "dm"):
-                for conv in result["conversations"]:
-                    cid = conv.get("cid", conv.get("id"))
-                    ctype = conv.get("type", "")
-                    log.info("Conversation: cid=%s type=%s", cid, ctype)
-                    if ctype == "chat":
-                        _cache["cid"] = cid
-                        _cache["chat_type"] = "dm"
-                        _cache["expires"] = now + CACHE_TTL
-                        return {
-                            "cid": cid,
-                            "type": "chat",
-                            "chat_type": "dm",
-                        }
-
-    log.warning("Trying specific endpoints for %s chat...", preferred_type)
+        # Get full match details to find TeamMUCName
+        match_details = valorant_api("GET", f"core-game/v1/matches/{match_id}")
+        if match_details and "TeamMUCName" in match_details:
+            team_cid = match_details["TeamMUCName"]
+            log.info("Team chat CID: %s", team_cid)
+            _cache["cid"] = team_cid
+            _cache["chat_type"] = "team"
+            _cache["expires"] = now + CACHE_TTL
+            return {
+                "cid": team_cid,
+                "type": "groupchat",
+                "chat_type": "team",
+            }
     
-    endpoints_to_try = []
-    if preferred_type in ("auto", "team"):
-        endpoints_to_try.append(("chat/v6/conversations/ares-coregame", "team"))
-    if preferred_type in ("auto", "pregame"):
-        endpoints_to_try.append(("chat/v6/conversations/ares-pregame", "pregame"))
-    if preferred_type in ("auto", "party"):
-        endpoints_to_try.append(("chat/v6/conversations/ares-parties", "party"))
+    # Try pregame
+    pregame_info = valorant_api("GET", f"pregame/v1/players/{puuid}")
+    if pregame_info and "MatchID" in pregame_info:
+        match_id = pregame_info["MatchID"]
+        log.info("Pregame match ID: %s", match_id)
+        
+        match_details = valorant_api("GET", f"pregame/v1/matches/{match_id}")
+        if match_details and "TeamMUCName" in match_details:
+            team_cid = match_details["TeamMUCName"]
+            log.info("Pregame team chat CID: %s", team_cid)
+            _cache["cid"] = team_cid
+            _cache["chat_type"] = "pregame"
+            _cache["expires"] = now + CACHE_TTL
+            return {
+                "cid": team_cid,
+                "type": "groupchat",
+                "chat_type": "pregame",
+            }
     
-    for endpoint, chat_type in endpoints_to_try:
-        result = valorant_api("GET", endpoint)
-        if result:
-            log.info("%s response: %s", endpoint, json.dumps(result, indent=2))
-            if "conversations" in result and result["conversations"]:
-                for conv in result["conversations"]:
-                    cid = conv.get("cid", conv.get("id"))
-                    log.info("Found %s conversation: %s", chat_type, cid)
+    # Fallback to DM conversations
+    result = valorant_api("GET", "chat/v6/conversations")
+    if result and "conversations" in result and result["conversations"]:
+        if preferred_type in ("auto", "dm"):
+            for conv in result["conversations"]:
+                cid = conv.get("cid", conv.get("id"))
+                ctype = conv.get("type", "")
+                log.info("Conversation: cid=%s type=%s", cid, ctype)
+                if ctype == "chat":
                     _cache["cid"] = cid
-                    _cache["chat_type"] = chat_type
+                    _cache["chat_type"] = "dm"
                     _cache["expires"] = now + CACHE_TTL
                     return {
                         "cid": cid,
-                        "type": "groupchat",
-                        "chat_type": chat_type,
+                        "type": "chat",
+                        "chat_type": "dm",
                     }
-
-    log.warning("No conversations found for type=%s", preferred_type)
+    
+    log.warning("No conversations found")
     return None
 
 
