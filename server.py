@@ -44,11 +44,59 @@ app = Flask(__name__)
 
 # Constants
 
-LOCKFILE_PATH = os.path.expandvars(
-    r"%LocalAppData%\Riot Games\Riot Client\Config\lockfile"
-)
-
-log.info("Lockfile path: %s", LOCKFILE_PATH)
+def find_valorant_lockfile():
+    import glob
+    import psutil
+    
+    paths_to_check = []
+    
+    # If Valorant game is running, find its lockfile
+    for proc in psutil.process_iter(['name', 'exe']):
+        try:
+            if proc.info['name'] and 'VALORANT' in proc.info['name'].upper() and 'Shipping' in proc.info['name']:
+                # Game is running, look for its lockfile
+                game_folder = os.path.dirname(proc.info['exe']) if proc.info['exe'] else None
+                if game_folder:
+                    potential_lockfile = os.path.join(game_folder, "ShooterGame", "Saved", "Config", "lockfile")
+                    if os.path.exists(potential_lockfile):
+                        paths_to_check.insert(0, potential_lockfile)  # Prioritize game lockfile
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    
+    # Fallback to common locations
+    paths_to_check.extend([
+        os.path.expandvars(r"%LocalAppData%\Riot Games\Riot Client\Config\lockfile"),
+        os.path.expandvars(r"%LocalAppData%\VALORANT\Saved\Config\lockfile"),
+    ])
+    
+    riot_folder = os.path.expandvars(r"%LocalAppData%\Riot Games")
+    if os.path.exists(riot_folder):
+        for root, dirs, files in os.walk(riot_folder):
+            if "lockfile" in files:
+                lf_path = os.path.join(root, "lockfile")
+                if lf_path not in paths_to_check:
+                    paths_to_check.append(lf_path)
+    
+    for path in paths_to_check:
+        if os.path.exists(path):
+            try:
+                with open(path, "r") as f:
+                    content = f.read().strip()
+                parts = content.split(":")
+                if len(parts) >= 4:
+                    log.info("Found lockfile at: %s", path)
+                    return {
+                        "path": path,
+                        "name": parts[0],
+                        "pid": parts[1],
+                        "port": parts[2],
+                        "password": parts[3],
+                        "protocol": parts[4] if len(parts) > 4 else "https",
+                    }
+            except Exception as e:
+                log.warning("Error reading %s: %s", path, e)
+    
+    return None
 
 # Cache for conversation CIDs (avoid spamming local API)
 _cache = {
@@ -64,29 +112,13 @@ CACHE_TTL = 30
 # ── Lockfile ───────────────────────────────────────────────────────────────
 
 def read_lockfile():
-    try:
-        with open(LOCKFILE_PATH, "r") as f:
-            content = f.read().strip()
-        log.info("Lockfile content: %s", content)
-        parts = content.split(":")
-        if len(parts) < 4:
-            log.warning("Lockfile has unexpected format: %s", parts)
-            return None
-        lockfile = {
-            "name": parts[0],
-            "pid": parts[1],
-            "port": parts[2],
-            "password": parts[3],
-            "protocol": parts[4] if len(parts) > 4 else "https",
-        }
-        log.info("Lockfile loaded: port=%s, protocol=%s", lockfile["port"], lockfile["protocol"])
-        return lockfile
-    except FileNotFoundError:
-        log.warning("Lockfile not found at: %s", LOCKFILE_PATH)
+    lockfile = find_valorant_lockfile()
+    if not lockfile:
+        log.warning("No lockfile found")
         return None
-    except Exception as e:
-        log.error("Error reading lockfile: %s", e)
-        return None
+    
+    log.info("Using lockfile: %s (port=%s)", lockfile["path"], lockfile["port"])
+    return lockfile
 
 
 # ── Valorant Local API client ──────────────────────────────────────────────
