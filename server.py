@@ -225,6 +225,216 @@ def valorant_api(method: str, endpoint: str, data: dict | None = None):
         return None
 
 
+# ── XMPP direct send (fallback when local API rejects team/party chat) ──────
+
+
+_xmpp_cache = {
+    "pas_token": None,
+    "client_config": None,
+    "expires": 0,
+}
+
+XMPP_CACHE_TTL = 300
+
+
+def get_pas_token(access_token: str) -> str | None:
+    """Get a PAS token from Riot's Player Affinity Service."""
+    now = time.time()
+    if _xmpp_cache["pas_token"] and now < _xmpp_cache["expires"]:
+        return _xmpp_cache["pas_token"]
+    try:
+        resp = requests.get(
+            "https://riot-geo.pas.si.riotgames.com/pas/v1/service/chat",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            token = data.get("token")
+            if token:
+                _xmpp_cache["pas_token"] = token
+                log.info("Got PAS token")
+                return token
+    except Exception as e:
+        log.warning("Failed to get PAS token: %s", e)
+    return None
+
+
+def get_chat_server_config(access_token: str, entitlements_token: str) -> dict | None:
+    """Get chat server host/port from Riot client config."""
+    now = time.time()
+    if _xmpp_cache["client_config"] and now < _xmpp_cache["expires"]:
+        return _xmpp_cache["client_config"]
+    try:
+        resp = requests.get(
+            "https://clientconfig.rpg.riotgames.com/api/v1/config/player",
+            params={"app": "Riot Client"},
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "X-Riot-Entitlements-JWT": entitlements_token,
+            },
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            _xmpp_cache["client_config"] = data
+            return data
+    except Exception as e:
+        log.warning("Failed to get client config: %s", e)
+    return None
+
+
+def xmpp_send_message(cid: str, message: str) -> bool:
+    """Send a chat message directly via XMPP, bypassing the local API.
+
+    Args:
+        cid: Full conversation ID, e.g. "matchid-blue@ares-coregame.eu1.pvp.net"
+        message: The text to send
+
+    Returns:
+        True if sent successfully, False otherwise.
+    """
+    import ssl
+    import socket
+
+    tokens_result = valorant_api("GET", "entitlements/v1/token")
+    if not tokens_result:
+        log.warning("XMPP: cannot get tokens")
+        return False
+
+    access_token = tokens_result.get("accessToken")
+    entitlements_token = tokens_result.get("token")
+    if not access_token or not entitlements_token:
+        log.warning("XMPP: missing tokens")
+        return False
+
+    pas_token = get_pas_token(access_token)
+    if not pas_token:
+        log.warning("XMPP: cannot get PAS token")
+        return False
+
+    config = get_chat_server_config(access_token, entitlements_token)
+    if not config:
+        log.warning("XMPP: cannot get client config")
+        return False
+
+    affinities = config.get("chat.affinities", {})
+    chat_port = config.get("chat.port", 5223)
+    if not affinities:
+        log.warning("XMPP: no chat affinities in config")
+        return False
+
+    shard = "eu1"
+    if "@" in cid:
+        domain = cid.split("@")[1]
+        for aff_id, aff_host in affinities.items():
+            if aff_id in domain or domain.startswith(aff_id + "."):
+                chat_host = aff_host
+                break
+        else:
+            chat_host = list(affinities.values())[0]
+    else:
+        chat_host = list(affinities.values())[0]
+
+    xmpp_domain = shard + ".pvp.net"
+    log.info("XMPP: connecting to %s:%d domain=%s", chat_host, chat_port, xmpp_domain)
+
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        sock = socket.create_connection((chat_host, int(chat_port)), timeout=10)
+        ssl_sock = ctx.wrap_socket(sock, server_hostname=chat_host)
+    except Exception as e:
+        log.warning("XMPP: connection failed: %s", e)
+        return False
+
+    def recv_until(marker: bytes, timeout: float = 5.0) -> bytes:
+        ssl_sock.settimeout(timeout)
+        data = b""
+        while marker not in data:
+            try:
+                chunk = ssl_sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            except socket.timeout:
+                break
+        return data
+
+    try:
+        stream_open = (
+            f"<?xml version='1.0'?>"
+            f"<stream:stream to='{xmpp_domain}' version='1.0' "
+            f"xmlns:stream='http://etherx.jabber.org/streams' "
+            f"xmlns='jabber:client'>"
+        )
+        ssl_sock.send(stream_open.encode())
+        resp = recv_until(b">")
+        if b"<stream:error" in resp or b"host-unknown" in resp:
+            log.warning("XMPP: stream error: %s", resp[:200])
+            return False
+
+        auth_xml = (
+            f"<auth mechanism='X-Riot-RSO-PAS' "
+            f"xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>"
+            f"<rso_token>{access_token}</rso_token>"
+            f"<pas_token>{pas_token}</pas_token>"
+            f"</auth>"
+        )
+        ssl_sock.send(auth_xml.encode())
+        resp = recv_until(b">")
+        if b"<success" not in resp and b"<failure" in resp:
+            log.warning("XMPP: auth failed: %s", resp[:200])
+            return False
+
+        stream_restart = (
+            f"<?xml version='1.0'?>"
+            f"<stream:stream to='{xmpp_domain}' version='1.0' "
+            f"xmlns:stream='http://etherx.jabber.org/streams' "
+            f"xmlns='jabber:client'>"
+        )
+        ssl_sock.send(stream_restart.encode())
+        recv_until(b">")
+
+        bind_iq = (
+            f"<iq id='_xmpp_bind1' type='set'>"
+            f"<bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/>"
+            f"</iq>"
+        )
+        ssl_sock.send(bind_iq.encode())
+        recv_until(b">")
+
+        session_iq = (
+            f"<iq id='_xmpp_session1' type='set'>"
+            f"<session xmlns='urn:ietf:params:xml:ns:xmpp-session'/>"
+            f"</iq>"
+        )
+        ssl_sock.send(session_iq.encode())
+        recv_until(b">")
+
+        msg_type = "groupchat" if "ares-coregame" in cid or "ares-pregame" in cid or "ares-parties" in cid else "chat"
+        msg_id = f"{int(time.time() * 1000)}:1"
+        message_xml = (
+            f"<message id='{msg_id}' to='{cid}' type='{msg_type}'>"
+            f"<body>{message}</body>"
+            f"</message>"
+        )
+        ssl_sock.send(message_xml.encode())
+        log.info("XMPP: sent message to %s", cid)
+        time.sleep(0.5)
+        ssl_sock.close()
+        return True
+
+    except Exception as e:
+        log.warning("XMPP: send failed: %s", e)
+        try:
+            ssl_sock.close()
+        except Exception:
+            pass
+        return False
+
+
 # ── WebSocket listener for live game state ─────────────────────────────────
 
 
@@ -814,8 +1024,9 @@ def send_chat_message(message: str, preferred_type: str = "auto") -> dict:
             "error": "No active chat conversation found. Are you in a game or party?",
         }
 
-    max_retries = 3
-    retry_delay = 1.0
+    is_constructed = chat["chat_type"] in ("coregame", "pregame", "party")
+    max_retries = 2
+    retry_delay = 1.5
 
     for attempt in range(1, max_retries + 1):
         result = valorant_api(
@@ -836,6 +1047,12 @@ def send_chat_message(message: str, preferred_type: str = "auto") -> dict:
             time.sleep(retry_delay)
             _cache["all_conversations"] = None
             _cache["all_conversations_expires"] = 0
+
+    if is_constructed:
+        log.info("Local API failed for %s, trying XMPP direct send...", chat["chat_type"])
+        if xmpp_send_message(chat["cid"], message):
+            return {"success": True, "message": message, "chat_type": chat["chat_type"]}
+        log.warning("XMPP direct send also failed")
 
     return {
         "success": False,
