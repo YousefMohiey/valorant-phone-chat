@@ -12,6 +12,7 @@ import base64
 import logging
 import os
 import sys
+import time
 import traceback
 from datetime import datetime
 
@@ -47,6 +48,17 @@ LOCKFILE_PATH = os.path.expandvars(
 )
 
 log.info("Lockfile path: %s", LOCKFILE_PATH)
+
+# Cache for conversation CIDs (avoid spamming local API)
+_cache = {
+    "cid": None,
+    "chat_type": None,
+    "expires": 0,
+    "session": None,
+    "session_expires": 0,
+}
+
+CACHE_TTL = 30
 
 # ── Lockfile ───────────────────────────────────────────────────────────────
 
@@ -126,52 +138,51 @@ def valorant_api(method: str, endpoint: str, data: dict | None = None):
 # ── Chat helpers ───────────────────────────────────────────────────────────
 
 def get_team_chat_cid():
-    # Try game chat first (in-match)
-    result = valorant_api("GET", "chat/v6/conversations/ares-coregame")
-    if result:
-        log.info("ares-coregame response: %s", result)
-        if "conversations" in result:
-            for conv in result["conversations"]:
-                log.info("Found coregame conversation: %s", conv)
+    now = time.time()
+    if _cache["cid"] and now < _cache["expires"]:
+        log.debug("Using cached CID: %s (%s)", _cache["cid"], _cache["chat_type"])
+        return {
+            "cid": _cache["cid"],
+            "type": "groupchat",
+            "chat_type": _cache["chat_type"],
+        }
+
+    result = valorant_api("GET", "chat/v6/conversations")
+    if result and "conversations" in result and result["conversations"]:
+        for conv in result["conversations"]:
+            cid = conv.get("cid", conv.get("id"))
+            ctype = conv.get("type", "")
+            log.info("Found conversation: cid=%s type=%s", cid, ctype)
+            if ctype == "groupchat":
+                _cache["cid"] = cid
+                _cache["chat_type"] = "team"
+                _cache["expires"] = now + CACHE_TTL
                 return {
-                    "cid": conv.get("cid", conv.get("id")),
+                    "cid": cid,
                     "type": "groupchat",
                     "chat_type": "team",
                 }
-    else:
-        log.warning("ares-coregame returned None")
 
-    # Try pre-game chat (agent select)
-    result = valorant_api("GET", "chat/v6/conversations/ares-pregame")
-    if result:
-        log.info("ares-pregame response: %s", result)
-        if "conversations" in result:
+    for endpoint, chat_type in [
+        ("chat/v6/conversations/ares-coregame", "team"),
+        ("chat/v6/conversations/ares-pregame", "pregame"),
+        ("chat/v6/conversations/ares-parties", "party"),
+    ]:
+        result = valorant_api("GET", endpoint)
+        if result and "conversations" in result and result["conversations"]:
             for conv in result["conversations"]:
-                log.info("Found pregame conversation: %s", conv)
+                cid = conv.get("cid", conv.get("id"))
+                log.info("Found %s conversation: %s", chat_type, cid)
+                _cache["cid"] = cid
+                _cache["chat_type"] = chat_type
+                _cache["expires"] = now + CACHE_TTL
                 return {
-                    "cid": conv.get("cid", conv.get("id")),
+                    "cid": cid,
                     "type": "groupchat",
-                    "chat_type": "pregame",
+                    "chat_type": chat_type,
                 }
-    else:
-        log.warning("ares-pregame returned None")
 
-    # Try party chat
-    result = valorant_api("GET", "chat/v6/conversations/ares-parties")
-    if result:
-        log.info("ares-parties response: %s", result)
-        if "conversations" in result:
-            for conv in result["conversations"]:
-                log.info("Found party conversation: %s", conv)
-                return {
-                    "cid": conv.get("cid", conv.get("id")),
-                    "type": "groupchat",
-                    "chat_type": "party",
-                }
-    else:
-        log.warning("ares-parties returned None")
-
-    log.error("No conversations found in any endpoint")
+    log.warning("No conversations found")
     return None
 
 
@@ -199,15 +210,21 @@ def send_chat_message(message: str) -> dict:
 
 # ── Status ─────────────────────────────────────────────────────────────────
 
-def get_status() -> dict:
-    """Check if Valorant is running and chat is available."""
-    lockfile = read_lockfile()
-    if not lockfile:
-        return {"valorant_running": False, "chat_ready": False}
+def get_status():
+    now = time.time()
 
-    # Verify the local API is reachable
-    session = valorant_api("GET", "chat/v1/session")
+    if _cache["session"] and now < _cache["session_expires"]:
+        session = _cache["session"]
+    else:
+        session = valorant_api("GET", "chat/v1/session")
+        if session:
+            _cache["session"] = session
+            _cache["session_expires"] = now + CACHE_TTL
+
     if not session:
+        lockfile = read_lockfile()
+        if not lockfile:
+            return {"valorant_running": False, "chat_ready": False}
         return {"valorant_running": True, "chat_ready": False, "error": "API unreachable"}
 
     chat = get_team_chat_cid()
