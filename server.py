@@ -6,6 +6,17 @@ Runs on the same Windows PC as Valorant. Reads the Riot lockfile to get API
 credentials, then proxies chat messages to Valorant's local HTTP API.
 
 Vanguard-safe: uses Valorant's own internal API, not keyboard injection.
+
+How it discovers team/party chat CIDs:
+    Uses ONLY the local API endpoints:
+      - GET /chat/v6/conversations/ares-coregame   (in-match team/all chat)
+      - GET /chat/v6/conversations/ares-parties    (party chat)
+      - GET /chat/v6/conversations                 (all conversations, for DMs)
+
+    No external GLZ calls — the glz-*.a.pvp.net hostnames are not
+    publicly resolvable via standard DNS, so any third-party HTTP
+    client (like Python's requests) cannot reach them. The local
+    API exposes the same conversation data without DNS headaches.
 """
 
 import base64
@@ -43,20 +54,21 @@ log.info("Logger initialized. Log file: %s", LOG_FILE)
 
 app = Flask(__name__)
 
-# Constants
+# ── Lockfile discovery ────────────────────────────────────────────────────
+
 
 def find_valorant_lockfile():
     import psutil
-    
+
     lockfile_candidates = []
-    
+
     for proc in psutil.process_iter(['pid', 'name', 'exe']):
         try:
             name = proc.info['name'] or ''
             if 'VALORANT' in name.upper() and 'Shipping' in name:
                 valorant_pid = proc.info['pid']
                 log.info("Found Valorant process: PID=%s, Name=%s", valorant_pid, name)
-                
+
                 if proc.info['exe']:
                     game_dir = os.path.dirname(proc.info['exe'])
                     potential_paths = [
@@ -70,7 +82,7 @@ def find_valorant_lockfile():
                             log.info("Found potential game lockfile: %s", path)
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
-    
+
     riot_folder = os.path.expandvars(r"%LocalAppData%\Riot Games")
     if os.path.exists(riot_folder):
         for root, dirs, files in os.walk(riot_folder):
@@ -79,7 +91,7 @@ def find_valorant_lockfile():
                 if lf_path not in lockfile_candidates:
                     lockfile_candidates.append(lf_path)
                     log.info("Found lockfile in search: %s", lf_path)
-    
+
     for path in lockfile_candidates:
         try:
             with open(path, "r") as f:
@@ -90,7 +102,7 @@ def find_valorant_lockfile():
                 if "Riot Client" in name and len(lockfile_candidates) > 1:
                     log.info("Skipping Riot Client lockfile: %s", path)
                     continue
-                
+
                 log.info("Using lockfile: %s (name=%s, port=%s)", path, name, parts[2])
                 return {
                     "path": path,
@@ -102,7 +114,7 @@ def find_valorant_lockfile():
                 }
         except Exception as e:
             log.warning("Error reading %s: %s", path, e)
-    
+
     for path in lockfile_candidates:
         try:
             with open(path, "r") as f:
@@ -120,7 +132,7 @@ def find_valorant_lockfile():
                 }
         except Exception as e:
             log.warning("Error reading %s: %s", path, e)
-    
+
     log.warning("No lockfile found")
     return None
 
@@ -131,21 +143,24 @@ _cache = {
     "expires": 0,
     "session": None,
     "session_expires": 0,
+    "all_conversations": None,
+    "all_conversations_expires": 0,
 }
 
-CACHE_TTL = 120
+CACHE_TTL = 60  # shorter TTL so we re-discover when user enters/leaves matches
 
 _last_send_time = 0
 SEND_COOLDOWN = 30
 
 # ── Lockfile ───────────────────────────────────────────────────────────────
 
+
 def read_lockfile():
     lockfile = find_valorant_lockfile()
     if not lockfile:
         log.warning("No lockfile found")
         return None
-    
+
     log.info("Using lockfile: %s (port=%s)", lockfile["path"], lockfile["port"])
     return lockfile
 
@@ -199,210 +214,199 @@ def valorant_api(method: str, endpoint: str, data: dict | None = None):
 
 # ── Chat helpers ───────────────────────────────────────────────────────────
 
-def get_rso_tokens():
-    result = valorant_api("GET", "entitlements/v1/token")
-    if result:
-        access_token = result.get("accessToken")
-        entitlements_token = result.get("token")
-        if access_token and entitlements_token:
-            return access_token, entitlements_token
-        log.warning("Missing tokens in entitlements response: accessToken=%s, token=%s",
-                   bool(access_token), bool(entitlements_token))
-    return None, None
 
-
-def get_region_and_shard():
-    conv_result = valorant_api("GET", "chat/v6/conversations")
-    if conv_result and "conversations" in conv_result:
-        for conv in conv_result["conversations"]:
-            cid = conv.get("cid", "")
-            if "@" in cid:
-                domain = cid.split("@")[1]
-                parts = domain.split(".")
-                if len(parts) >= 2:
-                    shard = parts[0]
-                    region = shard[:2]
-                    log.info("Derived region from CID: region=%s shard=%s", region, shard)
-                    return region, shard
-
-    result = valorant_api("GET", "riotclient/region-locale")
-    if result:
-        region = result.get("region", "eu").lower()
-        shard = result.get("shard") or (region + "1")
-        return region, shard.lower()
-
-    return "eu", "eu1"
-
-
-def get_glz_base_url():
-    region, shard = get_region_and_shard()
-    url = f"https://glz-{region}-1.{shard}.a.pvp.net"
-    log.info("GLZ URL: %s", url)
-    return url
-
-
-def get_match_id_from_glz(puuid, access_token, entitlements_token):
-    glz_url = get_glz_base_url()
-    
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "X-Riot-Entitlements-JWT": entitlements_token,
-    }
-    
-    try:
-        response = requests.get(
-            f"{glz_url}/core-game/v1/players/{puuid}",
-            headers=headers,
-            verify=False,
-            timeout=10
-        )
-        log.info("Core-game GLZ response: %d", response.status_code)
-        if response.status_code == 200:
-            data = response.json()
-            if "MatchID" in data:
-                return data["MatchID"], "coregame"
-        elif response.status_code != 404:
-            log.warning("Core-game GLZ: %s", response.text[:200])
-    except Exception as e:
-        log.warning("Core-game GLZ request failed: %s", e)
-    
-    try:
-        response = requests.get(
-            f"{glz_url}/pregame/v1/players/{puuid}",
-            headers=headers,
-            verify=False,
-            timeout=10
-        )
-        log.info("Pregame GLZ response: %d", response.status_code)
-        if response.status_code == 200:
-            data = response.json()
-            if "MatchID" in data:
-                return data["MatchID"], "pregame"
-    except Exception as e:
-        log.warning("Pregame GLZ request failed: %s", e)
-    
-    return None, None
-
-
-def get_team_chat_cid(preferred_type: str = "auto"):
+def get_puuid() -> str | None:
+    """Get the player's PUUID from the local session API."""
     now = time.time()
-    if _cache["cid"] and now < _cache["expires"] and (preferred_type == "auto" or _cache["chat_type"] == preferred_type):
+    if _cache["session"] and now < _cache["session_expires"]:
+        puuid = _cache["session"].get("puuid")
+        if puuid:
+            return puuid
+
+    session = valorant_api("GET", "chat/v1/session")
+    if session:
+        _cache["session"] = session
+        _cache["session_expires"] = now + CACHE_TTL
+        puuid = session.get("puuid")
+        if puuid:
+            log.info("Player PUUID: %s", puuid)
+            return puuid
+    return None
+
+
+def classify_conversation(cid: str) -> str:
+    """Classify a conversation CID into a chat type label."""
+    if not cid or "@" not in cid:
+        return "unknown"
+    domain = cid.split("@", 1)[1].lower()
+    if "ares-coregame" in domain:
+        return "coregame"  # in-match team/all chat
+    if "ares-pregame" in domain:
+        return "pregame"   # agent select chat
+    if "ares-parties" in domain:
+        return "party"     # party/lobby chat
+    if "pvp.net" in domain:
+        return "dm"        # direct message
+    return "unknown"
+
+
+def conversation_label(cid: str, ctype: str) -> str:
+    """Generate a human-readable label for a conversation."""
+    if ctype == "coregame":
+        # Team chat format: {match-id}-{team}@ares-coregame.{shard}.pvp.net
+        team = cid.split("@")[0].rsplit("-", 1)[-1]
+        if team == "blue":
+            return "Team (Blue)"
+        elif team == "red":
+            return "Enemy (Red)"
+        elif team == "all":
+            return "All Chat"
+        return f"Match ({team})"
+    elif ctype == "pregame":
+        return "Pregame (Agent Select)"
+    elif ctype == "party":
+        return "Party"
+    elif ctype == "dm":
+        return "DM"
+    return "Chat"
+
+
+def get_all_conversations() -> list[dict]:
+    """Fetch all conversations from the local API, categorized by type."""
+    now = time.time()
+    if _cache["all_conversations"] and now < _cache["all_conversations_expires"]:
+        return _cache["all_conversations"]
+
+    # Query all three ares-* endpoints in one go for efficiency
+    all_convs = []
+
+    for endpoint, label in [
+        ("chat/v6/conversations/ares-coregame", "coregame"),
+        ("chat/v6/conversations/ares-pregame", "pregame"),
+        ("chat/v6/conversations/ares-parties", "party"),
+        ("chat/v6/conversations", "dm"),
+    ]:
+        result = valorant_api("GET", endpoint)
+        if result and "conversations" in result:
+            for conv in result["conversations"]:
+                cid = conv.get("cid", "")
+                ctype = classify_conversation(cid)
+                # If classify_conversation couldn't determine type from domain,
+                # use the endpoint label
+                if ctype == "unknown":
+                    ctype = label
+                all_convs.append({
+                    "cid": cid,
+                    "type": ctype,
+                    "chat_type": conv.get("type", "groupchat"),
+                    "unread": conv.get("unread_count", 0),
+                    "muted": conv.get("muted", False),
+                })
+                log.info("Found conversation: cid=%s type=%s", cid, ctype)
+
+    # Deduplicate by CID (some endpoints may overlap)
+    seen = set()
+    unique = []
+    for conv in all_convs:
+        if conv["cid"] not in seen:
+            seen.add(conv["cid"])
+            unique.append(conv)
+
+    _cache["all_conversations"] = unique
+    _cache["all_conversations_expires"] = now + CACHE_TTL
+    return unique
+
+
+def get_team_chat_cid(preferred_type: str = "auto") -> dict | None:
+    """Discover the best chat CID for the current game state.
+
+    Priority:
+        1. Team chat (ares-coregame) - in a match
+        2. Pregame chat (ares-pregame) - in agent select
+        3. Party chat (ares-parties) - in a party
+        4. DM - last resort fallback
+
+    Returns dict with {cid, type, chat_type} or None.
+    """
+    now = time.time()
+    if (
+        _cache["cid"]
+        and now < _cache["expires"]
+        and (preferred_type == "auto" or _cache["chat_type"] == preferred_type)
+    ):
         log.debug("Using cached CID: %s (%s)", _cache["cid"], _cache["chat_type"])
         return {
             "cid": _cache["cid"],
-            "type": "groupchat" if _cache["chat_type"] != "dm" else "chat",
+            "type": "groupchat",
             "chat_type": _cache["chat_type"],
         }
 
-    # Get PUUID first
-    session = valorant_api("GET", "chat/v1/session")
-    if not session:
-        log.warning("Cannot get session info")
-        return None
-    
-    puuid = session.get("puuid")
+    # Ensure PUUID is available (needed for the /chat/v6/session call)
+    puuid = get_puuid()
     if not puuid:
-        log.warning("No PUUID in session")
+        log.warning("Cannot get PUUID")
         return None
-    
-    log.info("Player PUUID: %s", puuid)
-    
-    # Get RSO token for GLZ authentication
-    access_token, entitlements_token = get_rso_tokens()
-    if not access_token:
-        log.warning("Cannot get RSO tokens")
+
+    conversations = get_all_conversations()
+    if not conversations:
+        log.warning("No conversations found")
         return None
-    
-    log.info("Got RSO tokens")
-    
-    # Try to get match ID from GLZ
-    match_id, game_phase = get_match_id_from_glz(puuid, access_token, entitlements_token)
-    if match_id:
-        log.info("Found match ID: %s (phase: %s)", match_id, game_phase)
-        
-        glz_url = get_glz_base_url()
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "X-Riot-Entitlements-JWT": entitlements_token,
+
+    # Build priority list based on preference
+    if preferred_type == "team":
+        priority = ["coregame", "pregame", "party", "dm"]
+    elif preferred_type == "party":
+        priority = ["party", "coregame", "pregame", "dm"]
+    elif preferred_type == "dm":
+        priority = ["dm", "coregame", "pregame", "party"]
+    else:  # auto
+        priority = ["coregame", "pregame", "party", "dm"]
+
+    for ctype in priority:
+        for conv in conversations:
+            if conv["type"] == ctype:
+                cid = conv["cid"]
+                msg_type = conv["chat_type"]  # "groupchat" or "chat"
+                # For coregame: prefer the "blue" team conversation (your team)
+                # Skip "red" (enemy) and "all" unless explicitly asked
+                if ctype == "coregame" and preferred_type == "auto":
+                    team = cid.split("@")[0].rsplit("-", 1)[-1]
+                    if team not in ("blue", "all"):
+                        # Skip red (enemy team) in auto mode
+                        continue
+                log.info("Selected chat: cid=%s type=%s (preferred=%s)", cid, ctype, preferred_type)
+                _cache["cid"] = cid
+                _cache["chat_type"] = ctype
+                _cache["expires"] = now + CACHE_TTL
+                return {
+                    "cid": cid,
+                    "type": msg_type,
+                    "chat_type": ctype,
+                }
+
+    # Final fallback: return first available
+    if conversations:
+        conv = conversations[0]
+        log.info("Fallback to first conversation: cid=%s type=%s", conv["cid"], conv["type"])
+        _cache["cid"] = conv["cid"]
+        _cache["chat_type"] = conv["type"]
+        _cache["expires"] = now + CACHE_TTL
+        return {
+            "cid": conv["cid"],
+            "type": conv["chat_type"],
+            "chat_type": conv["type"],
         }
-        
-        try:
-            endpoint = f"{glz_url}/core-game/v1/matches/{match_id}" if game_phase == "coregame" else f"{glz_url}/pregame/v1/matches/{match_id}"
-            response = requests.get(endpoint, headers=headers, verify=False, timeout=10)
-            if response.status_code == 200:
-                match_details = response.json()
-                team_muc = match_details.get("TeamMUCName")
-                if team_muc:
-                    log.info("Team chat CID: %s", team_muc)
-                    _cache["cid"] = team_muc
-                    _cache["chat_type"] = game_phase
-                    _cache["expires"] = now + CACHE_TTL
-                    return {
-                        "cid": team_muc,
-                        "type": "groupchat",
-                        "chat_type": game_phase,
-                    }
-        except Exception as e:
-            log.warning("Failed to get match details: %s", e)
-    
-    if preferred_type in ("auto", "party"):
-        try:
-            glz_url = get_glz_base_url()
-            headers = {
-                "Authorization": f"Bearer {access_token}",
-                "X-Riot-Entitlements-JWT": entitlements_token,
-            }
-            response = requests.get(
-                f"{glz_url}/parties/v1/players/{puuid}",
-                headers=headers,
-                verify=False,
-                timeout=10
-            )
-            if response.status_code == 200:
-                party_data = response.json()
-                party_id = party_data.get("CurrentPartyID")
-                if party_id:
-                    log.info("Party ID: %s", party_id)
-                    _, shard = get_region_and_shard()
-                    party_cid = f"{party_id}@ares-parties.{shard}.pvp.net"
-                    log.info("Party chat CID: %s", party_cid)
-                    _cache["cid"] = party_cid
-                    _cache["chat_type"] = "party"
-                    _cache["expires"] = now + CACHE_TTL
-                    return {
-                        "cid": party_cid,
-                        "type": "groupchat",
-                        "chat_type": "party",
-                    }
-        except Exception as e:
-            log.warning("Party GLZ request failed: %s", e)
-    
-    # Fallback to DM conversations
-    result = valorant_api("GET", "chat/v6/conversations")
-    if result and "conversations" in result and result["conversations"]:
-        if preferred_type in ("auto", "dm"):
-            for conv in result["conversations"]:
-                cid = conv.get("cid", conv.get("id"))
-                ctype = conv.get("type", "")
-                log.info("Conversation: cid=%s type=%s", cid, ctype)
-                if ctype == "chat":
-                    _cache["cid"] = cid
-                    _cache["chat_type"] = "dm"
-                    _cache["expires"] = now + CACHE_TTL
-                    return {
-                        "cid": cid,
-                        "type": "chat",
-                        "chat_type": "dm",
-                    }
-    
-    log.warning("No conversations found")
+
     return None
 
 
 def send_chat_message(message: str, preferred_type: str = "auto") -> dict:
     chat = get_team_chat_cid(preferred_type)
     if not chat:
-        return {"success": False, "error": "No active chat conversation found. Are you in a game?"}
+        return {
+            "success": False,
+            "error": "No active chat conversation found. Are you in a game or party?",
+        }
 
     result = valorant_api(
         "POST",
@@ -421,6 +425,7 @@ def send_chat_message(message: str, preferred_type: str = "auto") -> dict:
 
 
 # ── Status ─────────────────────────────────────────────────────────────────
+
 
 def get_status():
     now = time.time()
@@ -451,6 +456,7 @@ def get_status():
 
 # ── Routes ─────────────────────────────────────────────────────────────────
 
+
 @app.route("/")
 def index():
     """Serve the mobile web UI."""
@@ -468,50 +474,75 @@ def api_status():
 
 @app.route("/api/conversations")
 def api_conversations():
+    """Return all available conversations with labels."""
     conversations = []
-    result = valorant_api("GET", "chat/v6/conversations")
-    if result and "conversations" in result:
-        for conv in result["conversations"]:
-            cid = conv.get("cid", "")
-            participants = valorant_api("GET", f"chat/v5/participants?cid={cid}")
-            name = "Unknown"
-            if participants and "participants" in participants:
-                for p in participants["participants"]:
-                    if p.get("puuid") != _cache.get("session", {}).get("puuid"):
-                        name = f"{p.get('game_name', '?')}#{p.get('game_tag', '?')}"
-                        break
-            
+    try:
+        all_convs = get_all_conversations()
+        puuid = get_puuid()
+
+        for conv in all_convs:
+            cid = conv["cid"]
+            ctype = conv["type"]
+            label = conversation_label(cid, ctype)
+
+            # For DMs, try to get the other person's name
+            if ctype == "dm":
+                name = "Unknown"
+                try:
+                    participants = valorant_api("GET", f"chat/v5/participants?cid={cid}")
+                    if participants and "participants" in participants:
+                        for p in participants["participants"]:
+                            if p.get("puuid") != puuid:
+                                name = f"{p.get('game_name', '?')}#{p.get('game_tag', '?')}"
+                                break
+                except Exception:
+                    pass
+            else:
+                name = label
+
             conversations.append({
                 "cid": cid,
                 "name": name,
-                "type": conv.get("type", "chat"),
-                "unread": conv.get("unread_count", 0),
+                "label": label,
+                "type": ctype,
+                "chat_type": conv["chat_type"],
+                "unread": conv.get("unread", 0),
             })
-    
+    except Exception as e:
+        log.error("Conversations endpoint error: %s\n%s", e, traceback.format_exc())
+
     return jsonify({"conversations": conversations})
+
 
 @app.route("/api/debug")
 def api_debug():
     endpoints_found = []
 
-    for ep in ["help", "swagger/v3/openapi.json", "chat/v5/session", "chat/v5/conversations"]:
+    for ep in ["help", "chat/v6/conversations/ares-coregame", "chat/v6/conversations/ares-pregame", "chat/v6/conversations/ares-parties", "chat/v6/conversations"]:
         result = valorant_api("GET", ep)
         if result:
-            endpoints_found.append({"endpoint": ep, "status": "200", "keys": list(result.keys()) if isinstance(result, dict) else "list", "preview": json.dumps(result)[:500]})
+            convs = result.get("conversations", [])
+            endpoints_found.append({
+                "endpoint": ep,
+                "status": "200",
+                "conversation_count": len(convs),
+                "cids": [c.get("cid") for c in convs],
+            })
         else:
             endpoints_found.append({"endpoint": ep, "status": "failed"})
-    
+
     return jsonify({"endpoints": endpoints_found})
+
 
 @app.route("/api/send", methods=["POST"])
 def api_send():
     global _last_send_time
-    
+
     now = time.time()
     if now - _last_send_time < SEND_COOLDOWN:
         wait = int(SEND_COOLDOWN - (now - _last_send_time))
         return jsonify({"success": False, "error": f"Rate limited. Wait {wait}s"}), 429
-    
+
     try:
         data = request.get_json(silent=True)
         if not data or "message" not in data:
@@ -523,7 +554,7 @@ def api_send():
         else:
             chat_type = data.get("chat_type", "auto")
             result = send_chat_message(data["message"].strip(), chat_type)
-        
+
         _last_send_time = time.time()
         status_code = 200 if result.get("success") else 400
         log.info("Send result: %s", result)
@@ -549,6 +580,7 @@ def send_to_cid(cid, message):
 
 
 # ── Main ───────────────────────────────────────────────────────────────────
+
 
 def get_local_ip() -> str:
     """
@@ -583,7 +615,7 @@ if __name__ == "__main__":
 
     print()
     print("  ========================================================")
-    print("  |        VALORANT PHONE CHAT BRIDGE v1.0              |")
+    print("  |        VALORANT PHONE CHAT BRIDGE v1.1              |")
     print("  |======================================================|")
     print("  |                                                      |")
     print("  |   On your phone, open:                               |")

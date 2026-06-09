@@ -26,3 +26,8 @@ instance/
 
 # Environment
 .env
+
+# Bridge runtime logs
+bridge.log
+bridge-run.log
+sniff.log

@@ -202,11 +202,37 @@
                 const data = await res.json();
                 conversationSelect.innerHTML = '';
                 if (data.conversations && data.conversations.length > 0) {
+                    // Group by type for visual clarity
+                    const groups = {
+                        coregame: [],
+                        pregame: [],
+                        party: [],
+                        dm: [],
+                    };
                     data.conversations.forEach(conv => {
-                        const opt = document.createElement('option');
-                        opt.value = conv.cid;
-                        opt.textContent = conv.name + (conv.unread ? ` (${conv.unread})` : '');
-                        conversationSelect.appendChild(opt);
+                        const t = conv.type || 'dm';
+                        if (groups[t]) groups[t].push(conv);
+                        else groups.dm.push(conv);
+                    });
+
+                    const groupLabels = {
+                        coregame: '🎮 In Match',
+                        pregame: '⏳ Agent Select',
+                        party: '👥 Party',
+                        dm: '💬 Direct Messages',
+                    };
+
+                    Object.entries(groups).forEach(([type, convs]) => {
+                        if (convs.length === 0) return;
+                        const og = document.createElement('optgroup');
+                        og.label = groupLabels[type] || type;
+                        convs.forEach(conv => {
+                            const opt = document.createElement('option');
+                            opt.value = conv.cid;
+                            opt.textContent = conv.name + (conv.unread ? ` (${conv.unread})` : '');
+                            og.appendChild(opt);
+                        });
+                        conversationSelect.appendChild(og);
                     });
                     selectedCid = data.conversations[0].cid;
                 } else {
