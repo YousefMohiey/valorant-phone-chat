@@ -2,6 +2,9 @@
 title Valorant Phone Chat Bridge
 setlocal enabledelayedexpansion
 
+:: Set UTF-8 encoding to avoid Unicode issues
+chcp 65001 >nul
+
 :: Log file — captures everything for debugging
 set LOGFILE=%~dp0bridge-run.log
 echo VALORANT PHONE CHAT BRIDGE — Run Log > "%LOGFILE%"
@@ -89,7 +92,9 @@ if %errorlevel% neq 0 (
         echo   Firewall rule added.
         echo   Firewall rule added. >> "%LOGFILE%"
     ) else (
-        echo   [WARNING] Could not add firewall rule. Allow port 8080 when prompted.
+        echo   [WARNING] Could not add firewall rule automatically.
+        echo   [WARNING] Run this file as Administrator to add it, or
+        echo             allow port 8080 when Windows prompts you.
         echo   [WARNING] Could not add firewall rule. >> "%LOGFILE%"
     )
 ) else (
@@ -102,16 +107,16 @@ echo.
 echo   Starting bridge server...
 echo   Starting bridge server... >> "%LOGFILE%"
 echo.
-echo   ╔══════════════════════════════════════════════════════╗
-echo   ║                                                    ║
-echo   ║   On your phone, open:                             ║
-echo   ║   http://%LAN_IP%:8080
-echo   ║                                                    ║
-echo   ║   Phone ^& PC must be on the same WiFi network.     ║
-echo   ║   Valorant must be running and in a match.         
-echo   ║                                                    ║
-echo   ║   Close this window to stop the bridge.            ║
-echo   ══════════════════════════════════════════════════════╝
+echo   ========================================================
+echo   ^|                                                    ^|
+echo   ^|   On your phone, open:                             ^|
+echo   ^|   http://%LAN_IP%:8080
+echo   ^|                                                    ^|
+echo   ^|   Phone ^& PC must be on the same WiFi network.     ^|
+echo   ^|   Valorant must be running and in a match.         ^|
+echo   ^|                                                    ^|
+echo   ^|   Close this window to stop the bridge.            ^|
+echo   ========================================================
 echo.
 
 echo   Server output >> "%LOGFILE%"
