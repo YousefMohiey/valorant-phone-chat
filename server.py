@@ -248,13 +248,25 @@ def get_pas_token(access_token: str) -> str | None:
             headers={"Authorization": f"Bearer {access_token}"},
             timeout=10,
         )
+        log.debug("PAS response: status=%d len=%d", resp.status_code, len(resp.text))
         if resp.status_code == 200:
-            data = resp.json()
-            token = data.get("token")
+            body = resp.text.strip()
+            if not body:
+                log.warning("PAS returned empty body")
+                return None
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError as e:
+                log.warning("PAS JSON parse error: %s — body[:100]=%s", e, body[:100])
+                return None
+            token = data.get("token") or data.get("pas_token") or data.get("accessToken")
             if token:
                 _xmpp_cache["pas_token"] = token
-                log.info("Got PAS token")
+                log.info("Got PAS token (len=%d)", len(token))
                 return token
+            log.warning("PAS response has no token field: %s", json.dumps(data)[:200])
+        else:
+            log.warning("PAS returned %d: %s", resp.status_code, resp.text[:200])
     except Exception as e:
         log.warning("Failed to get PAS token: %s", e)
     return None
@@ -275,10 +287,21 @@ def get_chat_server_config(access_token: str, entitlements_token: str) -> dict |
             },
             timeout=10,
         )
+        log.debug("Config response: status=%d len=%d", resp.status_code, len(resp.text))
         if resp.status_code == 200:
-            data = resp.json()
+            body = resp.text.strip()
+            if not body:
+                log.warning("Config returned empty body")
+                return None
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError as e:
+                log.warning("Config JSON parse error: %s", e)
+                return None
             _xmpp_cache["client_config"] = data
             return data
+        else:
+            log.warning("Config returned %d: %s", resp.status_code, resp.text[:200])
     except Exception as e:
         log.warning("Failed to get client config: %s", e)
     return None
