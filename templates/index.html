@@ -63,6 +63,12 @@
             <button class="type-btn" data-type="party">Party</button>
         </div>
 
+        <div class="dm-selector" id="dmSelector" style="display:none">
+            <select id="conversationSelect" class="conv-select">
+                <option value="">Loading...</option>
+            </select>
+        </div>
+
         <div id="messages" class="messages">
                 <div class="empty-state">
                     <div class="empty-icon">
@@ -135,8 +141,12 @@
         const typeBtns = document.querySelectorAll('.type-btn');
 
         let selectedChatType = 'auto';
+        let selectedCid = null;
         let isSending = false;
         let statusInterval = null;
+
+        const dmSelector = document.getElementById('dmSelector');
+        const conversationSelect = document.getElementById('conversationSelect');
 
         // ── Status polling ──────────────────────────────────────────
 
@@ -172,8 +182,43 @@
                 typeBtns.forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
                 selectedChatType = btn.dataset.type;
+                if (selectedChatType === 'dm') {
+                    dmSelector.style.display = 'block';
+                    loadConversations();
+                } else {
+                    dmSelector.style.display = 'none';
+                    selectedCid = null;
+                }
             });
         });
+
+        conversationSelect.addEventListener('change', () => {
+            selectedCid = conversationSelect.value;
+        });
+
+        async function loadConversations() {
+            try {
+                const res = await fetch('/api/conversations');
+                const data = await res.json();
+                conversationSelect.innerHTML = '';
+                if (data.conversations && data.conversations.length > 0) {
+                    data.conversations.forEach(conv => {
+                        const opt = document.createElement('option');
+                        opt.value = conv.cid;
+                        opt.textContent = conv.name + (conv.unread ? ` (${conv.unread})` : '');
+                        conversationSelect.appendChild(opt);
+                    });
+                    selectedCid = data.conversations[0].cid;
+                } else {
+                    const opt = document.createElement('option');
+                    opt.value = '';
+                    opt.textContent = 'No conversations found';
+                    conversationSelect.appendChild(opt);
+                }
+            } catch (err) {
+                conversationSelect.innerHTML = '<option value="">Error loading</option>';
+            }
+        }
 
         chatForm.addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -185,10 +230,16 @@
             sendBtn.classList.add('sending');
 
             try {
+                const body = { message };
+                if (selectedCid && selectedChatType === 'dm') {
+                    body.cid = selectedCid;
+                } else {
+                    body.chat_type = selectedChatType;
+                }
                 const res = await fetch('/api/send', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message, chat_type: selectedChatType })
+                    body: JSON.stringify(body)
                 });
                 const data = await res.json();
 

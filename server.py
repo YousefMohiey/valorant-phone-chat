@@ -342,6 +342,38 @@ def get_team_chat_cid(preferred_type: str = "auto"):
         except Exception as e:
             log.warning("Failed to get match details: %s", e)
     
+    if preferred_type in ("auto", "party"):
+        try:
+            glz_url = get_glz_base_url()
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "X-Riot-Entitlements-JWT": entitlements_token,
+            }
+            response = requests.get(
+                f"{glz_url}/parties/v1/players/{puuid}",
+                headers=headers,
+                verify=False,
+                timeout=10
+            )
+            if response.status_code == 200:
+                party_data = response.json()
+                party_id = party_data.get("CurrentPartyID")
+                if party_id:
+                    log.info("Party ID: %s", party_id)
+                    _, shard = get_region_and_shard()
+                    party_cid = f"{party_id}@ares-parties.{shard}.pvp.net"
+                    log.info("Party chat CID: %s", party_cid)
+                    _cache["cid"] = party_cid
+                    _cache["chat_type"] = "party"
+                    _cache["expires"] = now + CACHE_TTL
+                    return {
+                        "cid": party_cid,
+                        "type": "groupchat",
+                        "chat_type": "party",
+                    }
+        except Exception as e:
+            log.warning("Party GLZ request failed: %s", e)
+    
     # Fallback to DM conversations
     result = valorant_api("GET", "chat/v6/conversations")
     if result and "conversations" in result and result["conversations"]:
@@ -431,12 +463,42 @@ def api_status():
         return jsonify({"valorant_running": False, "chat_ready": False, "error": str(e)}), 500
 
 
+@app.route("/api/conversations")
+def api_conversations():
+    conversations = []
+    result = valorant_api("GET", "chat/v6/conversations")
+    if result and "conversations" in result:
+        for conv in result["conversations"]:
+            cid = conv.get("cid", "")
+            participants = valorant_api("GET", f"chat/v5/participants?cid={cid}")
+            name = "Unknown"
+            if participants and "participants" in participants:
+                for p in participants["participants"]:
+                    if p.get("puuid") != _cache.get("session", {}).get("puuid"):
+                        name = f"{p.get('game_name', '?')}#{p.get('game_tag', '?')}"
+                        break
+            
+            conversations.append({
+                "cid": cid,
+                "name": name,
+                "type": conv.get("type", "chat"),
+                "unread": conv.get("unread_count", 0),
+            })
+    
+    return jsonify({"conversations": conversations})
+
 @app.route("/api/send", methods=["POST"])
 def api_send():
     try:
         data = request.get_json(silent=True)
         if not data or "message" not in data:
             return jsonify({"success": False, "error": "Missing 'message' field"}), 400
+
+        direct_cid = data.get("cid")
+        if direct_cid:
+            result = send_to_cid(direct_cid, data["message"].strip())
+            status_code = 200 if result.get("success") else 400
+            return jsonify(result), status_code
 
         chat_type = data.get("chat_type", "auto")
         result = send_chat_message(data["message"].strip(), chat_type)
@@ -446,6 +508,21 @@ def api_send():
     except Exception as e:
         log.error("Send endpoint crashed: %s\n%s", e, traceback.format_exc())
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+def send_to_cid(cid, message):
+    result = valorant_api(
+        "POST",
+        "chat/v6/messages",
+        data={
+            "cid": cid,
+            "message": message,
+            "type": "chat",
+        },
+    )
+    if result:
+        return {"success": True, "message": message, "chat_type": "dm"}
+    return {"success": False, "error": "Failed to send message"}
 
 
 # ── Main ───────────────────────────────────────────────────────────────────
