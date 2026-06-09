@@ -212,7 +212,6 @@ def get_rso_tokens():
 
 
 def get_region_and_shard():
-    # Always prefer chat-derived region (more accurate than region-locale)
     conv_result = valorant_api("GET", "chat/v6/conversations")
     if conv_result and "conversations" in conv_result:
         for conv in conv_result["conversations"]:
@@ -223,17 +222,15 @@ def get_region_and_shard():
                 if len(parts) >= 2:
                     shard = parts[0]
                     region = shard[:2]
-                    log.info("Derived region from chat: region=%s shard=%s", region, shard)
+                    log.info("Derived region from CID: region=%s shard=%s", region, shard)
                     return region, shard
-    
-    # Fallback to region-locale
+
     result = valorant_api("GET", "riotclient/region-locale")
     if result:
-        log.info("Region-locale response: %s", json.dumps(result))
         region = result.get("region", "eu").lower()
-        shard = (result.get("shard") or (region + "1")).lower()
-        return region, shard
-    
+        shard = result.get("shard") or (region + "1")
+        return region, shard.lower()
+
     return "eu", "eu1"
 
 
