@@ -1118,7 +1118,7 @@ def send_chat_message(message: str, preferred_type: str = "auto") -> dict:
 
     return {
         "success": False,
-        "error": f"Failed to send to {chat['chat_type']} chat. Conversation may not be active yet.",
+        "error": f"Failed to send to {chat['chat_type']} chat. Type one message in-game first to create the chat room, then try again.",
     }
 
 
