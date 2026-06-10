@@ -47,6 +47,9 @@
                 <span class="status-dot"></span>
                 <span id="statusText">Checking...</span>
             </div>
+            <div id="initHint" class="init-hint" style="display:none">
+                ⚠️ Type one message in-game first, then try again
+            </div>
         </header>
 
         <!-- ═══ Main Content ═══ -->
@@ -132,6 +135,7 @@
         // ── DOM References ─────────────────────────────────────────
         const statusBar = document.getElementById('statusBar');
         const statusText = document.getElementById('statusText');
+        const initHint = document.getElementById('initHint');
         const messagesDiv = document.getElementById('messages');
         const chatForm = document.getElementById('chatForm');
         const messageInput = document.getElementById('messageInput');
@@ -159,6 +163,12 @@
                     data.chat_ready ? 'status-online' :
                     data.valorant_running ? 'status-waiting' : 'status-offline'
                 );
+
+                if (data.needs_init) {
+                    initHint.style.display = 'block';
+                } else {
+                    initHint.style.display = 'none';
+                }
 
                 if (data.chat_ready) {
                     const playerName = data.player_name || 'Player';

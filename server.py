@@ -1143,11 +1143,18 @@ def get_status():
         return {"valorant_running": True, "chat_ready": False, "error": "API unreachable"}
 
     chat = get_team_chat_cid()
+    chat_type = chat["chat_type"] if chat else None
+    needs_init = False
+    if chat_type in ("coregame", "pregame", "party"):
+        ares_cids = get_all_conversations()
+        if chat_type not in [c["type"] for c in ares_cids]:
+            needs_init = True
 
     return {
         "valorant_running": True,
         "chat_ready": chat is not None,
-        "chat_type": chat["chat_type"] if chat else None,
+        "chat_type": chat_type,
+        "needs_init": needs_init,
         "player_name": f"{session.get('game_name', '?')}#{session.get('game_tag', '?')}",
     }
 
