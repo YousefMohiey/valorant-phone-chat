@@ -1098,6 +1098,24 @@ def send_chat_message(message: str, preferred_type: str = "auto") -> dict:
             return {"success": True, "message": message, "chat_type": chat["chat_type"]}
         log.warning("XMPP direct send also failed")
 
+        log.info("Retrying local API after XMPP attempt...")
+        _cache["all_conversations"] = None
+        _cache["all_conversations_expires"] = 0
+        _cache["cid"] = None
+        for attempt in range(3):
+            result = valorant_api(
+                "POST",
+                "chat/v6/messages",
+                data={
+                    "cid": chat["cid"],
+                    "message": message,
+                    "type": chat["type"],
+                },
+            )
+            if result:
+                return {"success": True, "message": message, "chat_type": chat["chat_type"]}
+            time.sleep(2)
+
     return {
         "success": False,
         "error": f"Failed to send to {chat['chat_type']} chat. Conversation may not be active yet.",
