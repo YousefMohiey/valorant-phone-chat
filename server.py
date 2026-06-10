@@ -439,7 +439,25 @@ def xmpp_send_message(cid: str, message: str) -> bool:
         ssl_sock.send(session_iq.encode())
         recv_until(b">")
 
-        msg_type = "groupchat" if "ares-coregame" in cid or "ares-pregame" in cid or "ares-parties" in cid else "chat"
+        is_muc = "ares-coregame" in cid or "ares-pregame" in cid or "ares-parties" in cid
+        if is_muc:
+            puuid = get_puuid()
+            if puuid:
+                nick = f"~riot~{puuid[:8]}"
+                presence_xml = (
+                    f"<presence to='{cid}/{nick}'>"
+                    f"<x xmlns='http://jabber.org/protocol/muc'/>"
+                    f"</presence>"
+                )
+                ssl_sock.send(presence_xml.encode())
+                resp = recv_until(b"/nick>", timeout=3.0)
+                if b"type=\"error\"" in resp:
+                    log.warning("XMPP: MUC join error: %s", resp[:300])
+                else:
+                    log.info("XMPP: joined MUC room %s as %s", cid, nick)
+                time.sleep(0.3)
+
+        msg_type = "groupchat" if is_muc else "chat"
         msg_id = f"{int(time.time() * 1000)}:1"
         message_xml = (
             f"<message id='{msg_id}' to='{cid}' type='{msg_type}'>"
